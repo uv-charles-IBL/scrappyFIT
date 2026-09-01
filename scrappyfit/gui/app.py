@@ -31,10 +31,12 @@ from .. import __version__, config
 from ..analysis import masking as MSK
 from ..batch import run_batch, summarise
 from ..io.gpda_write import from_session as write_dam_from_session
+from ..io.gpyield_write import from_session as write_yield_from_session
 from ..io.live import LiveLMF, refresh_session
 from ..physics import lineid
 from ..session import FitOptions, Session
 from .canvases import MapCanvas, SpectrumCanvas, toolbar_for
+from .dialogs import ElementDialog, SampleModelDialog
 
 # The element lists are not a fixed menu. They are rebuilt from the working
 # energy range, so every element with a line you could actually detect is
@@ -75,6 +77,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session = Session()
         self.setWindowTitle('scrappyFIT %s' % __version__)
         self.resize(1500, 950)
+        self.elements = ElementDialog(self.session.db, self)
+        self.elements.selectionChanged.connect(self._on_elements_changed)
+        self.sample = SampleModelDialog(self.session.db, self)
         self._build()
         self._refresh_db_label()
         self.rebuild_element_lists()
@@ -101,6 +106,7 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addSeparator()
         f.addAction('&Export analysis...', self.on_export, 'Ctrl+E')
         f.addAction('Export &DA matrix (.dam)...', self.on_export_dam)
+        f.addAction('Export &yield file (.yield)...', self.on_export_yield)
         f.addAction('Save spectrum &image...', self.on_save_image,
                     'Ctrl+P')
         f.addSeparator()
@@ -108,6 +114,7 @@ class MainWindow(QtWidgets.QMainWindow):
         a = m.addMenu('&Analysis')
         a.addAction('&Fit', self.on_fit, 'Ctrl+F')
         a.addAction('&Quantify', self.on_quantify, 'Ctrl+Shift+Q')
+        a.addAction('Sample &model...', self.on_sample_model)
         a.addAction('&Batch...', self.on_batch, 'Ctrl+B')
         a.addSeparator()
         a.addAction('&Identify peaks', self.on_identify, 'Ctrl+I')
@@ -156,46 +163,44 @@ class MainWindow(QtWidgets.QMainWindow):
         # -- elements
         g = QtWidgets.QGroupBox('Elements')
         gl = QtWidgets.QVBoxLayout(g)
-        self.ed_filter = QtWidgets.QLineEdit()
-        self.ed_filter.setPlaceholderText(
-            'filter by symbol, e.g. "Fe" or "Fe Ni Zn"')
-        self.ed_filter.textChanged.connect(self.on_filter)
-        gl.addWidget(self.ed_filter)
-        self.tabs_el = QtWidgets.QTabWidget()
-        self.el_lists = {}
-        for shell in (1, 2, 3):
-            lw = QtWidgets.QListWidget()
-            lw.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
-            lw.setMaximumHeight(170)
-            self.el_lists[shell] = lw
-            self.tabs_el.addTab(lw, SHELL_NAMES[shell])
-        gl.addWidget(self.tabs_el)
+        b_el = QtWidgets.QPushButton('Choose elements...')
+        b_el.setMinimumHeight(30)
+        b_el.setToolTip('Periodic table. Click an element to cycle which of '
+                        'its shells are fitted; a second tab shows any '
+                        'element line table.')
+        b_el.clicked.connect(self.on_choose_elements)
+        gl.addWidget(b_el)
+        self.lbl_els = QtWidgets.QLabel('(nothing selected)')
+        self.lbl_els.setWordWrap(True)
+        self.lbl_els.setStyleSheet('font-size:11px; color:#0F766E;')
+        gl.addWidget(self.lbl_els)
         row = QtWidgets.QHBoxLayout()
-        b1 = QtWidgets.QPushButton('Light preset')
-        b1.clicked.connect(lambda: self.preset(PRESET_LIGHT, [], []))
-        b2 = QtWidgets.QPushButton('Silicate preset')
-        b2.clicked.connect(lambda: self.preset(PRESET_SILICATE,
-                                               ['Fe', 'Ni'], []))
-        b3 = QtWidgets.QPushButton('Clear')
-        b3.clicked.connect(lambda: self.preset([], [], []))
-        for b in (b1, b2, b3):
-            row.addWidget(b)
-        gl.addLayout(row)
-        row2 = QtWidgets.QHBoxLayout()
         b4 = QtWidgets.QPushButton('Suggest from spectrum')
         b4.setToolTip('Find peaks, then highlight the elements whose lines '
-                      'explain them. Highlighted entries are candidates, not '
-                      'conclusions.')
+                      'explain them. Candidates, not conclusions.')
         b4.clicked.connect(self.on_suggest)
         b5 = QtWidgets.QPushButton('Accept suggested')
         b5.clicked.connect(self.on_accept_suggested)
-        row2.addWidget(b4)
-        row2.addWidget(b5)
-        gl.addLayout(row2)
+        row.addWidget(b4)
+        row.addWidget(b5)
+        gl.addLayout(row)
         self.lbl_sugg = QtWidgets.QLabel('')
         self.lbl_sugg.setWordWrap(True)
         self.lbl_sugg.setStyleSheet('color:#0F766E; font-size:10px;')
         gl.addWidget(self.lbl_sugg)
+        v.addWidget(g)
+
+        # -- sample model
+        g = QtWidgets.QGroupBox('Sample model')
+        gl = QtWidgets.QVBoxLayout(g)
+        b_sm = QtWidgets.QPushButton('Matrix and thickness...')
+        b_sm.clicked.connect(self.on_sample_model)
+        gl.addWidget(b_sm)
+        self.lbl_sm = QtWidgets.QLabel('matrix bootstrapped from the fit, '
+                                       'thick target, 1.0 MeV, 135 deg')
+        self.lbl_sm.setWordWrap(True)
+        self.lbl_sm.setStyleSheet('color:#666; font-size:10px;')
+        gl.addWidget(self.lbl_sm)
         v.addWidget(g)
 
         # -- detector efficiency
@@ -396,21 +401,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_db.setText(str(p) if p else 'NOT FOUND - set one via File menu')
 
     def preset(self, k, l, m):
+        pairs = []
         for shell, names in ((1, k), (2, l), (3, m)):
-            lw = self.el_lists[shell]
-            for i in range(lw.count()):
-                it = lw.item(i)
-                it.setSelected(it.text() in names)
+            for nm in names:
+                Z = self.session.db.z.get(nm.lower())
+                if Z:
+                    pairs.append((Z, shell))
+        self.elements.set_selection(pairs)
 
     def selected_elements(self):
-        out = []
-        for shell, lw in self.el_lists.items():
-            for it in lw.selectedItems():
-                try:
-                    out.append((self.session.db.z[it.text().lower()], shell))
-                except KeyError:
-                    pass
-        return out
+        return self.elements.selection()
 
     def line_labels(self):
         if not self._want_labels:
@@ -730,56 +730,50 @@ class MainWindow(QtWidgets.QMainWindow):
     # -- element lists ----------------------------------------------------
 
     def rebuild_element_lists(self):
-        """Repopulate K/L/M from the current energy window, preserving what
-        was already selected.
+        """Tell the element dialog what the current energy window allows.
 
-        Called at startup and whenever the fit range changes. Widening the
-        range to 12 keV brings the transition metal K lines into the K tab;
-        narrowing it to 3 keV drops them. The list always reflects what is
-        actually detectable, which is the only honest thing for it to show.
+        An element with no line in the window is greyed out, and a selection
+        that becomes impossible is dropped. Widening the range to 12 keV makes
+        the transition-metal K lines available; narrowing to 3 keV removes
+        them again. The table always shows what is actually detectable.
         """
         o = self.session.options
         try:
-            db = self.session.db
+            self.elements.set_range(o.e_low, o.e_high)
         except Exception as ex:
-            self.say('Cannot build element lists: %s' % ex)
+            self.say('Cannot rebuild the element table: %s' % ex)
             return
-        keep = {sh: {self.session.db.sym[Z] for Z, s2 in self.selected_elements()
-                     if s2 == sh}
-                for sh in (1, 2, 3)} if self.el_lists[1].count() else {}
-        for sh, lw in self.el_lists.items():
-            lw.blockSignals(True)
-            lw.clear()
-            for Z, sym in elements_in_range(db, sh, o.e_low, o.e_high):
-                it = QtWidgets.QListWidgetItem(sym, lw)
-                e = db.line_energy(Z, sh)
-                it.setToolTip('%s %s-shell, main line %.4f keV'
-                              % (sym, SHELL_NAMES[sh], e))
-                if sym in keep.get(sh, ()):
-                    it.setSelected(True)
-            lw.blockSignals(False)
-            self.tabs_el.setTabText(sh - 1, '%s (%d)'
-                                    % (SHELL_NAMES[sh], lw.count()))
         self._range_shown = (o.e_low, o.e_high)
-        syms = [self.el_lists[1].item(i).text()
-                for i in range(self.el_lists[1].count())]
+        syms = [b.symbol for b in
+                sorted(self.elements.table.buttons.values(), key=lambda x: x.Z)
+                if b.available]
         self.cmb_mapel.clear()
         self.cmb_mapel.addItems(syms)
-        self.say('Element lists rebuilt for %.2f-%.2f keV: %d K, %d L, %d M '
-                 'available.' % (o.e_low, o.e_high, self.el_lists[1].count(),
-                                 self.el_lists[2].count(),
-                                 self.el_lists[3].count()))
+        n = sum(len(b.available)
+                for b in self.elements.table.buttons.values())
+        self.say('Element table set for %.2f-%.2f keV: %d element-shell '
+                 'combinations available.' % (o.e_low, o.e_high, n))
 
-    def on_filter(self, text):
-        """Hide entries that do not match, without disturbing selection."""
-        want = [t.strip().lower() for t in text.replace(',', ' ').split()
-                if t.strip()]
-        for lw in self.el_lists.values():
-            for i in range(lw.count()):
-                it = lw.item(i)
-                hide = bool(want) and not any(
-                    it.text().lower().startswith(w) for w in want)
-                it.setHidden(hide)
+    def on_choose_elements(self):
+        self.elements.show()
+        self.elements.raise_()
+        self.elements.activateWindow()
+
+    def _on_elements_changed(self):
+        self.lbl_els.setText('selected: ' + self.elements.table.summary())
+
+    def on_sample_model(self):
+        self.sample.show()
+        self.sample.raise_()
+        self.sample.activateWindow()
+
+    def _sample_summary(self):
+        m = self.sample.matrix()
+        t = self.sample.thickness()
+        return ('matrix %s, %s, %.3g MeV, %.0f deg'
+                % ('typed (%d elements)' % len(m) if m else 'bootstrapped',
+                   'thick target' if t is None else '%.4g mg/cm2' % t,
+                   self.sample.beam(), self.sample.theta()))
 
     # -- line identification ---------------------------------------------
 
@@ -877,49 +871,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_sugg.setText('suggested: ' + top)
 
     def _highlight_suggested(self, sug):
-        want = {}
-        for sym, sh, sc, n in sug:
-            want.setdefault(sh, {})[sym] = sc
-        for sh, lw in self.el_lists.items():
-            hits = want.get(sh, {})
-            for i in range(lw.count()):
-                it = lw.item(i)
-                sc = hits.get(it.text())
-                if sc:
-                    it.setBackground(QtGui.QBrush(QtGui.QColor('#CFF3EA')))
-                    it.setToolTip('suggested by the spectrum, score %.2f' % sc)
-                else:
-                    it.setBackground(QtGui.QBrush(QtGui.QColor(0, 0, 0, 0)))
-                    it.setToolTip('')
+        self.elements.set_suggested(sug)
 
     def on_accept_suggested(self):
-        """Select every highlighted element, so a fit can be run on them."""
+        """Add every suggested element-shell to the fit selection."""
         if not self._suggested:
             self.say('Run "Suggest from spectrum" first.')
             return
-        want = {}
+        have = {}
+        for Z, sh in self.elements.selection():
+            have.setdefault(Z, set()).add(sh)
+        added, skipped = 0, []
         for sym, sh, sc, n in self._suggested:
-            want.setdefault(sh, set()).add(sym)
-        added = 0
-        for sh, lw in self.el_lists.items():
-            names = want.get(sh, set())
-            for i in range(lw.count()):
-                it = lw.item(i)
-                if it.text() in names and not it.isSelected():
-                    it.setSelected(True)
-                    added += 1
-        missing = []
-        for sh, names in want.items():
-            have = {self.el_lists[sh].item(i).text()
-                    for i in range(self.el_lists[sh].count())}
-            missing += ['%s%s' % (n, SHELL_NAMES[sh])
-                        for n in names if n not in have]
-        msg = 'Selected %d suggested elements.' % added
-        if missing:
-            msg += (' Not offered in the current %.2f-%.2f keV window: %s. '
-                    'Widen the range if you want them.'
-                    % (self.session.options.e_low, self.session.options.e_high,
-                       ', '.join(missing)))
+            Z = self.session.db.z.get(sym.lower())
+            btn = self.elements.table.buttons.get(sym)
+            if Z is None or btn is None or sh not in btn.available:
+                skipped.append('%s%s' % (sym, {1: 'K', 2: 'L', 3: 'M'}[sh]))
+                continue
+            if sh not in have.get(Z, ()):
+                have.setdefault(Z, set()).add(sh)
+                added += 1
+        self.elements.set_selection(
+            [(Z, sh) for Z, shs in have.items() for sh in shs])
+        msg = 'Added %d suggested element-shells.' % added
+        if skipped:
+            msg += (' Outside the %.2f-%.2f keV window: %s.'
+                    % (self.session.options.e_low,
+                       self.session.options.e_high, ', '.join(skipped)))
+        msg += (' Prune anything you cannot justify - every spurious '
+                'component is another way for the fit to explain a feature '
+                'with the wrong element.')
         self.say(msg)
 
     # -- efficiency and quantification ----------------------------------
@@ -956,15 +937,24 @@ class MainWindow(QtWidgets.QMainWindow):
                      'a peak area cannot become a concentration.')
             return
         try:
-            s.quantify()
+            s.quantify(matrix=self.sample.matrix(),
+                       thickness=self.sample.thickness(),
+                       beam_MeV=self.sample.beam(),
+                       theta_deg=self.sample.theta())
         except Exception as ex:
             self.say('QUANTIFY FAILED: %s' % ex)
             return
+        self.lbl_sm.setText(self._sample_summary())
         rows = s.concentration_table()
         body = chr(10).join('   %-3s %8.3f wt%%  +-%.1f%%' % r for r in rows)
         self.say('Concentrations, normalised to 100 wt%% over K-shell '
                  'elements:' + chr(10) + body)
         self.fill_table(s.fit)
+        if s._conc:
+            was_boot = self.sample.rb_boot.isChecked()
+            self.sample.fill_from(s._conc, s.db)
+            if was_boot:
+                self.sample.rb_boot.setChecked(True)
         self.tabs.setCurrentIndex(2)
 
     # -- mask tools ------------------------------------------------------
@@ -1080,6 +1070,37 @@ class MainWindow(QtWidgets.QMainWindow):
         units = 'ppm' if s.efficiency is not None else 'area units'
         self.say('Wrote %s in %s. GeoPIXE can load this and project maps '
                  'with it.' % (os.path.basename(path), units))
+
+    def on_export_yield(self):
+        """Write a GeoPIXE .yield for the current sample model.
+
+        Version -3: the newest whose content is fully determined by things we
+        actually know. From -8 the format embeds an IDL beam struct whose
+        exact byte layout would have to be guessed, and a calibration file
+        that loads but is subtly wrong is the worst possible outcome. The MAC
+        provenance field only exists from -12, so the real settings go into a
+        sidecar .provenance.json rather than being silently lost.
+        """
+        s = self.session
+        if s.fit is None:
+            self.say('Fit first - the element list comes from the fit.')
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, 'Write yield file', '', 'GeoPIXE yield (*.yield)')
+        if not path:
+            return
+        try:
+            write_yield_from_session(
+                s, path, matrix=self.sample.matrix(),
+                thickness=self.sample.thickness(),
+                beam_MeV=self.sample.beam(), theta_deg=self.sample.theta())
+        except Exception as ex:
+            self.say('YIELD EXPORT FAILED: %s' % ex)
+            return
+        self.say('Wrote %s (format version -3) plus a .provenance.json '
+                 'recording the MAC dataset, fluorescence yields and '
+                 'efficiency curve, which version -3 cannot store.'
+                 % os.path.basename(path))
 
     def on_attach_live(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(

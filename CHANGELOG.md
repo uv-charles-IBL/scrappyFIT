@@ -121,3 +121,24 @@ element has a line nearby. On a chondrite that produced 13,425 counts of
   readable. The x-axis is now clamped to the fit range; previously a guide
   for a line at 30 keV would stretch the axis and squeeze the data into a
   sliver.
+
+## 0.5.0 - periodic table, sample model, yield writer
+
+- **Periodic table element selector**, replacing the fixed lists. Each cell
+  cycles none - K - L - M - KL - LM - KLM, skipping any shell with no line in
+  the window, so one repeated click walks the possibilities. A second tab is a
+  read-only line viewer: click an element, read its table. Browsing what an
+  element emits and deciding to fit it are different acts, and a viewer that
+  silently changed the fit would be a trap.
+- **Sample model dialog** (`Analysis - Sample model`). Matrix either
+  bootstrapped from the fitted areas or typed in, plus thickness, beam energy
+  and take-off angle. Every concentration depends on these and they were
+  previously invisible. After quantifying, the result is offered back as a
+  typed matrix so refining is one click.
+- **Yield file writer** (`io/gpyield_write.py`). Version -3 deliberately: from
+  -8 the format embeds an IDL beam struct whose byte layout would have to be
+  guessed, and a calibration file that loads but is subtly wrong is the worst
+  outcome. The MAC provenance field only exists from -12, so the real settings
+  go in a sidecar .provenance.json rather than being silently lost.
+- Fixed: the x-axis was not clamped, so a guide for a line outside the window
+  stretched the plot to 78 keV.
