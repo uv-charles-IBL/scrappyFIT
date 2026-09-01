@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scrappyfit"
+version = "0.1.0"
+description = "Light-element PIXE spectrum fitting, mapping and quantification"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.7",
+    "matplotlib>=3.5",
+    "PyQt5>=5.15",
+    "xraylib>=4.1",
+    "xraydb>=4.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.gui-scripts]
+scrappyfit = "scrappyfit.gui:main"
+
+[project.scripts]
+scrappyfit-cli = "scrappyfit.gui:main"
+
+[tool.setuptools.packages.find]
+include = ["scrappyfit*"]
+
+[tool.setuptools.package-data]
+scrappyfit = ["resources/**/*"]

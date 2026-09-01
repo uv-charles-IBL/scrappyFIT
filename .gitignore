@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.idea/
+.vscode/
+
+# analysis output and scratch
+out/
+exports/
+*.png
+!docs/img/*.png
+
+# large binaries that belong beside the code, not in it
+*.lmf
+*.dam
+*.dai

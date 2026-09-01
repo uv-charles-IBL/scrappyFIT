@@ -1,0 +1,578 @@
+"""scrappyFIT main window.
+
+The workflow this is built around, which is the one GeoPIXE supports plus the
+two things it makes hard:
+
+    1. open a file          LMF list mode, .dam, .spec text, or two columns
+    2. set the calibration  gain and offset, checkable against known lines
+    3. choose elements      K lines, and L or M where the element needs them
+    4. fit                  peak shape + detector response + SNIP background
+    5. look at the residual the panel under the spectrum is where lies show up
+    6. map an element       needs list mode
+    7. MASK A REGION        drag on the map, or threshold it, then refit -
+                            this is the step that turns a bulk average into a
+                            measurement of an actual phase
+    8. export               one folder holding spectrum, model, components,
+                            residual, areas, mask and every option used
+
+Steps 6-7 are the reason this exists. A heterogeneous sample's bulk spectrum
+describes nowhere in it, and the fitted numbers from one are an average over
+regions that may share no mineral.
+"""
+
+import os
+import sys
+import traceback
+
+import numpy as np
+from PyQt5 import QtCore, QtGui, QtWidgets
+
+from .. import __version__, config
+from ..session import FitOptions, Session
+from .canvases import MapCanvas, SpectrumCanvas, toolbar_for
+
+# Elements offered by default. K lines for everything light, plus the L and M
+# entries that actually appear in a 6.6 keV window.
+DEFAULT_K = ['C', 'N', 'O', 'F', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl',
+             'K', 'Ca', 'Ti', 'Cr', 'Mn', 'Fe', 'Ni', 'Cu', 'Zn']
+DEFAULT_L = ['Fe', 'Ni', 'Cu', 'Zn', 'Br', 'Ag', 'In', 'Sn', 'I']
+DEFAULT_M = ['Au', 'Hg', 'Pb']
+
+
+class MainWindow(QtWidgets.QMainWindow):
+
+    def __init__(self):
+        super().__init__()
+        self.session = Session()
+        self.setWindowTitle('scrappyFIT %s' % __version__)
+        self.resize(1500, 950)
+        self._build()
+        self._refresh_db_label()
+
+    # ------------------------------------------------------------ layout
+
+    def _build(self):
+        self._build_menu()
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        split.addWidget(self._left_panel())
+        split.addWidget(self._centre())
+        split.setStretchFactor(1, 1)
+        split.setSizes([360, 1140])
+        self.setCentralWidget(split)
+        self.status = self.statusBar()
+        self.status.showMessage('Open a spectrum or list-mode file to begin.')
+
+    def _build_menu(self):
+        m = self.menuBar()
+        f = m.addMenu('&File')
+        f.addAction('&Open...', self.on_open, 'Ctrl+O')
+        f.addAction('Set &database folder...', self.on_set_db)
+        f.addSeparator()
+        f.addAction('&Export analysis...', self.on_export, 'Ctrl+E')
+        f.addSeparator()
+        f.addAction('&Quit', self.close, 'Ctrl+Q')
+        a = m.addMenu('&Analysis')
+        a.addAction('&Fit', self.on_fit, 'Ctrl+F')
+        a.addAction('Clear &mask', self.on_clear_mask)
+        a.addSeparator()
+        a.addAction('Check &calibration against known lines', self.on_check_cal)
+        h = m.addMenu('&Help')
+        h.addAction('&About', self.on_about)
+
+    def _left_panel(self):
+        w = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(8, 8, 8, 8)
+
+        # -- file
+        g = QtWidgets.QGroupBox('Data')
+        gl = QtWidgets.QFormLayout(g)
+        self.lbl_file = QtWidgets.QLabel('(nothing loaded)')
+        self.lbl_file.setWordWrap(True)
+        btn = QtWidgets.QPushButton('Open...')
+        btn.clicked.connect(self.on_open)
+        self.spin_adc = QtWidgets.QSpinBox()
+        self.spin_adc.setRange(0, 7)
+        self.spin_adc.valueChanged.connect(self.on_adc_changed)
+        gl.addRow(btn)
+        gl.addRow('File', self.lbl_file)
+        gl.addRow('ADC', self.spin_adc)
+        self.lbl_db = QtWidgets.QLabel('')
+        self.lbl_db.setWordWrap(True)
+        self.lbl_db.setStyleSheet('color: #666; font-size: 10px;')
+        gl.addRow('Database', self.lbl_db)
+        v.addWidget(g)
+
+        # -- calibration
+        g = QtWidgets.QGroupBox('Calibration   E = offset + gain x channel')
+        gl = QtWidgets.QFormLayout(g)
+        self.ed_gain = QtWidgets.QLineEdit('0.0017000')
+        self.ed_off = QtWidgets.QLineEdit('-0.37500')
+        for e in (self.ed_gain, self.ed_off):
+            e.editingFinished.connect(self.on_cal_changed)
+        gl.addRow('gain keV/ch', self.ed_gain)
+        gl.addRow('offset keV', self.ed_off)
+        v.addWidget(g)
+
+        # -- elements
+        g = QtWidgets.QGroupBox('Elements')
+        gl = QtWidgets.QVBoxLayout(g)
+        self.tabs_el = QtWidgets.QTabWidget()
+        self.el_lists = {}
+        for shell, names in ((1, DEFAULT_K), (2, DEFAULT_L), (3, DEFAULT_M)):
+            lw = QtWidgets.QListWidget()
+            lw.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+            for n in names:
+                QtWidgets.QListWidgetItem(n, lw)
+            lw.setMaximumHeight(150)
+            self.el_lists[shell] = lw
+            self.tabs_el.addTab(lw, {1: 'K', 2: 'L', 3: 'M'}[shell])
+        gl.addWidget(self.tabs_el)
+        row = QtWidgets.QHBoxLayout()
+        b1 = QtWidgets.QPushButton('Light preset')
+        b1.clicked.connect(lambda: self.preset(
+            ['C', 'N', 'O', 'F', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl',
+             'K', 'Ca'], [], []))
+        b2 = QtWidgets.QPushButton('Silicate preset')
+        b2.clicked.connect(lambda: self.preset(
+            ['C', 'N', 'O', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'K',
+             'Ca', 'Ti', 'Cr', 'Mn', 'Fe'], ['Fe', 'Ni'], []))
+        b3 = QtWidgets.QPushButton('Clear')
+        b3.clicked.connect(lambda: self.preset([], [], []))
+        for b in (b1, b2, b3):
+            row.addWidget(b)
+        gl.addLayout(row)
+        v.addWidget(g)
+
+        # -- options
+        g = QtWidgets.QGroupBox('Fit options')
+        gl = QtWidgets.QFormLayout(g)
+        o = self.session.options
+        self.ed_elo = QtWidgets.QLineEdit(str(o.e_low))
+        self.ed_ehi = QtWidgets.QLineEdit(str(o.e_high))
+        self.cmb_mac = QtWidgets.QComboBox()
+        self.cmb_mac.addItems(['mixed', 'ffast', 'henke1993', 'xcom',
+                               'sabbatuccisalvat2016'])
+        self.cmb_lines = QtWidgets.QComboBox()
+        self.cmb_lines.addItems(['xray_lines_rebuilt.txt', 'xray_lines.txt'])
+        self.cmb_lines.currentTextChanged.connect(
+            lambda s: self.session.set_lines_file(s))
+        self.chk_escape = QtWidgets.QCheckBox('Si LVV escape step')
+        self.chk_escape.setChecked(o.use_escape_step)
+        self.chk_contact = QtWidgets.QCheckBox('Al contact injection')
+        self.chk_contact.setChecked(o.use_contact_step)
+        self.chk_window = QtWidgets.QCheckBox('Si3N4 window (N K edge)')
+        self.chk_window.setChecked(o.use_window_step)
+        self.chk_nonneg = QtWidgets.QCheckBox('Forbid negative areas')
+        self.chk_nonneg.setChecked(o.nonneg == 'strict')
+        gl.addRow('E low keV', self.ed_elo)
+        gl.addRow('E high keV', self.ed_ehi)
+        gl.addRow('MAC dataset', self.cmb_mac)
+        gl.addRow('Line data', self.cmb_lines)
+        for c in (self.chk_escape, self.chk_contact, self.chk_window,
+                  self.chk_nonneg):
+            gl.addRow(c)
+        v.addWidget(g)
+
+        self.btn_fit = QtWidgets.QPushButton('FIT')
+        self.btn_fit.setMinimumHeight(34)
+        self.btn_fit.clicked.connect(self.on_fit)
+        v.addWidget(self.btn_fit)
+        v.addStretch(1)
+
+        sc = QtWidgets.QScrollArea()
+        sc.setWidget(w)
+        sc.setWidgetResizable(True)
+        sc.setMinimumWidth(340)
+        return sc
+
+    def _centre(self):
+        tabs = QtWidgets.QTabWidget()
+
+        # spectrum tab
+        sw = QtWidgets.QWidget()
+        sv = QtWidgets.QVBoxLayout(sw)
+        self.spec = SpectrumCanvas()
+        self.spec.rangeSelected.connect(self.on_range)
+        bar = QtWidgets.QHBoxLayout()
+        cb_log = QtWidgets.QCheckBox('log y')
+        cb_log.setChecked(True)
+        cb_log.toggled.connect(self.spec.set_log)
+        cb_cmp = QtWidgets.QCheckBox('components')
+        cb_cmp.setChecked(True)
+        cb_cmp.toggled.connect(self.spec.set_components)
+        cb_lab = QtWidgets.QCheckBox('line labels')
+        cb_lab.setChecked(True)
+        cb_lab.toggled.connect(self.on_labels)
+        self._want_labels = True
+        b_full = QtWidgets.QPushButton('Full range')
+        b_full.clicked.connect(self.refresh_spectrum)
+        for x in (cb_log, cb_cmp, cb_lab, b_full):
+            bar.addWidget(x)
+        bar.addStretch(1)
+        sv.addWidget(toolbar_for(self.spec, sw))
+        sv.addLayout(bar)
+        sv.addWidget(self.spec, 1)
+        tabs.addTab(sw, 'Spectrum')
+
+        # map tab
+        mw = QtWidgets.QWidget()
+        mv = QtWidgets.QVBoxLayout(mw)
+        top = QtWidgets.QHBoxLayout()
+        self.cmb_mapel = QtWidgets.QComboBox()
+        self.cmb_mapel.addItems(DEFAULT_K)
+        self.cmb_mapel.setEditable(True)
+        b_map = QtWidgets.QPushButton('Show map')
+        b_map.clicked.connect(self.on_map)
+        self.spin_bin = QtWidgets.QSpinBox()
+        self.spin_bin.setRange(1, 32)
+        self.spin_bin.setValue(4)
+        self.chk_sub = QtWidgets.QCheckBox('subtract background')
+        self.chk_sub.setChecked(True)
+        self.spin_thr = QtWidgets.QSpinBox()
+        self.spin_thr.setRange(50, 99)
+        self.spin_thr.setValue(90)
+        b_thr = QtWidgets.QPushButton('Mask above percentile')
+        b_thr.clicked.connect(self.on_threshold)
+        b_clr = QtWidgets.QPushButton('Clear mask')
+        b_clr.clicked.connect(self.on_clear_mask)
+        for x, lab in ((self.cmb_mapel, 'element'), (self.spin_bin, 'binning'),
+                       (self.spin_thr, 'percentile')):
+            top.addWidget(QtWidgets.QLabel(lab))
+            top.addWidget(x)
+        top.addWidget(self.chk_sub)
+        top.addWidget(b_map)
+        top.addWidget(b_thr)
+        top.addWidget(b_clr)
+        top.addStretch(1)
+        self.map = MapCanvas()
+        self.map.regionSelected.connect(self.on_region)
+        mv.addLayout(top)
+        mv.addWidget(self.map, 1)
+        tabs.addTab(mw, 'Maps')
+
+        # results tab
+        rw = QtWidgets.QWidget()
+        rv = QtWidgets.QVBoxLayout(rw)
+        self.table = QtWidgets.QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ['component', 'area', 'error', 'rel %'])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        rv.addWidget(self.table)
+        tabs.addTab(rw, 'Results')
+
+        # log tab
+        self.log = QtWidgets.QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setFont(QtGui.QFont('Consolas', 9))
+        tabs.addTab(self.log, 'Log')
+        self.tabs = tabs
+        return tabs
+
+    # ------------------------------------------------------------ helpers
+
+    def say(self, msg):
+        self.log.appendPlainText(msg)
+        self.status.showMessage(msg, 8000)
+
+    def _refresh_db_label(self):
+        p = config.database_path(required=False)
+        self.lbl_db.setText(str(p) if p else 'NOT FOUND - set one via File menu')
+
+    def preset(self, k, l, m):
+        for shell, names in ((1, k), (2, l), (3, m)):
+            lw = self.el_lists[shell]
+            for i in range(lw.count()):
+                it = lw.item(i)
+                it.setSelected(it.text() in names)
+
+    def selected_elements(self):
+        out = []
+        for shell, lw in self.el_lists.items():
+            for it in lw.selectedItems():
+                try:
+                    out.append((self.session.db.z[it.text().lower()], shell))
+                except KeyError:
+                    pass
+        return out
+
+    def line_labels(self):
+        if not self._want_labels:
+            return []
+        out = []
+        for Z, sh in self.selected_elements():
+            e = self.session.db.line_energy(Z, sh)
+            if e > 0:
+                out.append((self.session.db.sym[Z] +
+                            {1: '', 2: 'L', 3: 'M'}[sh], e))
+        return out
+
+    def apply_options(self):
+        o = self.session.options
+        try:
+            o.e_low = float(self.ed_elo.text())
+            o.e_high = float(self.ed_ehi.text())
+        except ValueError:
+            pass
+        o.mac = self.cmb_mac.currentText()
+        o.use_escape_step = self.chk_escape.isChecked()
+        o.use_contact_step = self.chk_contact.isChecked()
+        o.use_window_step = self.chk_window.isChecked()
+        o.nonneg = 'strict' if self.chk_nonneg.isChecked() else True
+        self.session.invalidate()
+
+    # ------------------------------------------------------------ actions
+
+    def on_open(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Open spectrum or list-mode file', '',
+            'All supported (*.lmf *.dam *.spec *.txt);;'
+            'OMDAQ list mode (*.lmf);;GeoPIXE DA matrix (*.dam);;'
+            'Text (*.txt *.spec);;All files (*)')
+        if not path:
+            return
+        try:
+            self.session.load(path, adc=self.spin_adc.value())
+        except Exception as ex:
+            self.say('LOAD FAILED: %s' % ex)
+            QtWidgets.QMessageBox.critical(self, 'Load failed', str(ex))
+            return
+        s = self.session
+        self.lbl_file.setText('%s\n%s' % (os.path.basename(path), s.label))
+        self.ed_gain.setText('%.7f' % s.cal[0])
+        self.ed_off.setText('%.5f' % s.cal[1])
+        self.say('Loaded %s: %d channels, %.0f counts%s'
+                 % (os.path.basename(path), len(s.spectrum), s.spectrum.sum(),
+                    ', %d events with positions' % len(s.events[0])
+                    if s.events is not None else ''))
+        if s.events is None:
+            self.say('  no event positions in this format - maps and masking '
+                     'are unavailable (open the .lmf for those)')
+        self.refresh_spectrum()
+
+    def on_adc_changed(self):
+        if self.session.path and self.session.path.lower().endswith('.lmf'):
+            self.session.load(self.session.path, adc=self.spin_adc.value())
+            self.refresh_spectrum()
+
+    def on_set_db(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self, 'Select the GeoPIXE database folder (contains dat/)')
+        if not d:
+            return
+        try:
+            config.save_database_path(d)
+            self.session._db = None
+            self._refresh_db_label()
+            self.say('Database set to %s' % d)
+        except Exception as ex:
+            QtWidgets.QMessageBox.critical(self, 'Not a database folder', str(ex))
+
+    def on_cal_changed(self):
+        if self.session.spectrum is None:
+            return
+        try:
+            self.session.set_calibration(float(self.ed_gain.text()),
+                                         float(self.ed_off.text()))
+        except ValueError:
+            return
+        self.refresh_spectrum()
+
+    def on_labels(self, on):
+        self._want_labels = bool(on)
+        self.refresh_spectrum()
+
+    def on_range(self, lo, hi):
+        self.spec.set_xlim(lo, hi)
+        self.say('zoom %.3f - %.3f keV' % (lo, hi))
+
+    def refresh_spectrum(self):
+        s = self.session
+        if s.spectrum is None:
+            return
+        title = s.label + (' [%s]' % s.mask_name if s.mask_name else '')
+        self.spec.show(s.energy, s.spectrum, fit=s.fit,
+                       background=s._bk, labels=self.line_labels(),
+                       title=title)
+
+    def on_fit(self):
+        s = self.session
+        if s.spectrum is None:
+            self.say('Nothing loaded.')
+            return
+        els = self.selected_elements()
+        if not els:
+            self.say('Select at least one element.')
+            return
+        self.apply_options()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            r = s.run_fit(els)
+        except Exception as ex:
+            self.say('FIT FAILED: %s' % ex)
+            self.log.appendPlainText(traceback.format_exc())
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        self.say('Fit: chi2red = %.3f over %d components%s'
+                 % (r.reduced_chi2, len(r.names),
+                    ' [%s]' % s.mask_name if s.mask_name else ''))
+        self.fill_table(r)
+        self.refresh_spectrum()
+
+    def fill_table(self, r):
+        rows = sorted(zip(r.names, r.areas, r.errors), key=lambda t: -t[1])
+        self.table.setRowCount(len(rows))
+        for i, (nm, a, e) in enumerate(rows):
+            rel = '%.1f' % (100 * e / a) if a > 0 else '-'
+            for j, txt in enumerate((nm, '%.0f' % a, '%.0f' % e, rel)):
+                it = QtWidgets.QTableWidgetItem(txt)
+                if a <= 0:
+                    it.setForeground(QtGui.QBrush(QtGui.QColor('#999')))
+                self.table.setItem(i, j, it)
+
+    def on_map(self):
+        s = self.session
+        if s.events is None:
+            self.say('Maps need a list-mode (.lmf) file.')
+            return
+        el = self.cmb_mapel.currentText().strip()
+        try:
+            m = s.element_map(el, binning=self.spin_bin.value(),
+                              subtract=self.chk_sub.isChecked())
+        except Exception as ex:
+            self.say('MAP FAILED: %s' % ex)
+            return
+        self.map.show_map(m, '%s   (%dx%d bin%s)'
+                          % (el, self.spin_bin.value(), self.spin_bin.value(),
+                             ', net' if self.chk_sub.isChecked() else ', raw'))
+        self.tabs.setCurrentIndex(1)
+        if self.chk_sub.isChecked() and np.nanmedian(m) < 0:
+            self.say('WARNING: this net map is mostly negative. Flanking '
+                     'subtraction fails where a weak line sits between strong '
+                     'neighbours (Al between Mg and Si is the usual case). '
+                     'Untick "subtract background" and read it as raw counts.')
+
+    def on_region(self, mask):
+        try:
+            n = self.session.set_mask(mask, 'region')
+        except Exception as ex:
+            self.say('MASK FAILED: %s' % ex)
+            return
+        self.say('Region mask: %d pixels, %d events. Refit to analyse it.'
+                 % (int(mask.sum()), n))
+        self.refresh_spectrum()
+
+    def on_threshold(self):
+        m = self.map.threshold_mask(self.spin_thr.value())
+        if m is None:
+            self.say('Show a map first.')
+            return
+        try:
+            n = self.session.set_mask(m, 'top%d' % self.spin_thr.value())
+        except Exception as ex:
+            self.say('MASK FAILED: %s' % ex)
+            return
+        self.say('Threshold mask (top %d%%): %d pixels, %d events.'
+                 % (100 - self.spin_thr.value(), int(m.sum()), n))
+        self.refresh_spectrum()
+
+    def on_clear_mask(self):
+        self.session.clear_mask()
+        self.say('Mask cleared - back to the whole field.')
+        self.refresh_spectrum()
+
+    def on_check_cal(self):
+        """Fit the centroid of each selected element's main line and report
+        how far it is from the true energy. Calibration errors of a few tens
+        of eV move light-element lines onto each other."""
+        s = self.session
+        if s.spectrum is None:
+            return
+        from scipy.optimize import least_squares
+        a, b = s.cal
+        out = []
+        for Z, sh in self.selected_elements():
+            if sh != 1:
+                continue
+            E0 = s.db.line_energy(Z)
+            if E0 <= 0:
+                continue
+            c0 = (E0 - b) / a
+            sg = max(np.sqrt(s.options.noise ** 2 +
+                             s.options.fano ** 2 * E0) / 2.355, 3.0)
+            lo, hi = int(max(c0 - 4 * sg, 2)), int(min(c0 + 4 * sg,
+                                                       len(s.spectrum) - 2))
+            if hi - lo < 8:
+                continue
+            x = np.arange(lo, hi + 1, dtype=float)
+            y = s.spectrum[lo:hi + 1].astype(float)
+
+            def mdl(p):
+                return p[0] * np.exp(-0.5 * ((x - p[1]) / max(p[2], .5)) ** 2) + p[3]
+
+            def res(p):
+                mm = np.maximum(mdl(p), 1e-9)
+                return (y - mm) / np.sqrt(np.maximum(mm, 1.0))
+            try:
+                p = least_squares(
+                    res, [max(y.max(), 1), c0, sg, max(np.median(y), .1)],
+                    bounds=([0, c0 - 12, .5, 0],
+                            [np.inf, c0 + 12, 5 * sg, np.inf]),
+                    max_nfev=2000).x
+                out.append('   %-3s %7.3f keV   error %+5.0f eV'
+                           % (s.db.sym[Z], E0, 1000 * (a * p[1] + b - E0)))
+            except Exception:
+                pass
+        self.say('Calibration check:\n' + ('\n'.join(out) if out else
+                                           '   select some K-line elements first'))
+        self.tabs.setCurrentIndex(3)
+
+    def on_export(self):
+        s = self.session
+        if s.spectrum is None:
+            self.say('Nothing to export.')
+            return
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self, 'Choose a folder to write the analysis into')
+        if not d:
+            return
+        try:
+            w = s.export(d)
+        except Exception as ex:
+            self.say('EXPORT FAILED: %s' % ex)
+            return
+        self.say('Exported %d files to %s:\n   %s'
+                 % (len(w), d, '\n   '.join(w)))
+        self.tabs.setCurrentIndex(3)
+
+    def on_about(self):
+        QtWidgets.QMessageBox.about(
+            self, 'scrappyFIT',
+            '<b>scrappyFIT %s</b><br><br>'
+            'Light-element PIXE fitting and mapping.<br><br>'
+            'Reads OMDAQ list-mode and GeoPIXE formats. Adds selectable mass '
+            'attenuation datasets, rebuilt L and M line data, and detector '
+            'response terms that GeoPIXE does not model - without which a fit '
+            'can invent elements the sample does not contain.<br><br>'
+            'Database: %s' % (__version__,
+                              config.database_path(required=False)))
+
+
+def main(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    app = QtWidgets.QApplication(argv)
+    app.setApplicationName('scrappyFIT')
+    win = MainWindow()
+    win.show()
+    if len(argv) > 1 and os.path.exists(argv[1]):
+        try:
+            win.session.load(argv[1])
+            win.refresh_spectrum()
+        except Exception:
+            pass
+    return app.exec_()
+
+
+if __name__ == '__main__':
+    sys.exit(main())
