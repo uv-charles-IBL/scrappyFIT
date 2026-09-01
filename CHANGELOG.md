@@ -81,3 +81,20 @@ element has a line nearby. On a chondrite that produced 13,425 counts of
   file: 599,294 events, identical to a static read.
 - GUI: efficiency selector, QUANTIFY, wt% column, Batch dialog, DA export,
   live attach with a 1 s poll, flood/grow/shrink mask tools.
+
+## 0.3.0 - self-contained, and it can tell you what is in the spectrum
+
+- **Database vendored** into `scrappyfit/resources/database` (5.9 MB, 15
+  files). A fresh install now needs nothing else - it runs off a flash drive.
+  An external database still wins if one is configured.
+- **Line identification** (`physics/lineid.py`). Click the spectrum for
+  ranked candidate lines at that energy.
+- **Element suggestion** from the whole spectrum. Peaks are found against a
+  local background, then elements scored on whether their lines explain them.
+  Three rules reject coincidences: the strongest visible line must be
+  present, conspicuously absent lines are penalised, and matches are weighted
+  by peak size. Verified on four samples - quartz gives O/Si, the perovskite
+  gives Si/Pb/I/In, salt rock gives Na/Cl, gold-on-carbon gives C/AuM.
+  Coincidences still appear lower down; it is a shortlist, not a verdict.
+- GUI: identify-on-click, Find peaks, Suggest from spectrum with highlighting
+  in the element lists, Accept suggested.

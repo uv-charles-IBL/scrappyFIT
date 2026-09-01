@@ -61,7 +61,10 @@ from PyPI.
 
 ### The atomic database
 
-scrappyFIT needs GeoPIXE's data directory — the one containing `dat/` with
+**A copy is vendored in the package**, so a fresh install works with no
+GeoPIXE present - including off a flash drive. Nothing needs configuring.
+
+To point at a different one (a newer GeoPIXE tree, say), scrappyFIT looks — the one containing `dat/` with
 `ElamDB12.txt`, `xray_lines*.txt`, `MAC_*.txt`, `xsect_K/L/M.txt` and
 `hubbell.dat`. It is found in this order:
 
@@ -71,10 +74,8 @@ scrappyFIT needs GeoPIXE's data directory — the one containing `dat/` with
 4. the path saved in `~/.scrappyfit/config.json`
 5. a GeoPIXE tree sitting beside the checkout
 
-In the GUI: **File → Set database folder**. It is remembered.
-
-For a flash-drive or offline install, copy the database into
-`scrappyfit/resources/database` and it travels with the code.
+In the GUI: **File → Set database folder**. It is remembered. The vendored
+copy is used unless you override it.
 
 ### Running
 
@@ -118,6 +119,42 @@ This is not a formality. A 60 eV error moves oxygen Kα onto the artefact
 discussed in section 5, and light-element lines are only 100–150 eV apart. On
 a well-calibrated setup you should see errors within ±20 eV; if you see 50 eV
 or more, fix it before believing anything else.
+
+### 3.2b Identify what is in the spectrum
+
+Two tools, and they answer different questions.
+
+**Click on the spectrum** (with *identify on click* ticked) to list the X-ray
+lines near that energy, ranked. This is what you reach for when the residual
+shows a feature you did not model. It lists candidates - it does not decide,
+because at any energy in a light-element spectrum there are several honest
+answers.
+
+**Suggest from spectrum** finds every peak above 6 sigma and highlights the
+elements whose lines would explain them. That is a stronger question than
+identifying one energy, because it uses the whole pattern.
+
+The scoring exists to reject coincidences, which at 70 eV tolerance are
+everywhere. Three rules:
+
+1. an element's **strongest visible line must be present** - a stray match on
+   tin's Lb4 with no La is not tin
+2. lines that **should** be visible and are not are **penalised**, which is
+   what stops a dense heavy-element L series matching anything
+3. matches are **weighted by peak size**, so explaining the dominant peak
+   counts for more than clipping a small one
+
+Without rule 3 a quartz spectrum ranked indium above silicon. With all three,
+the top hits come out right: quartz gives O and Si, the perovskite gives Si
+then Pb, I and In, salt rock gives Na and Cl, and the gold-on-carbon target
+gives C and Au M.
+
+**Treat the list as a shortlist.** Real coincidences still appear further
+down - Ta M and Rb L show up in the perovskite and are not there. The fit is
+what settles it, and the screening tests in section 5 settle it after that.
+
+**Accept suggested** selects the highlighted entries. Anything not already in
+the default element lists is reported in the log rather than added silently.
 
 ### 3.3 Choose elements
 

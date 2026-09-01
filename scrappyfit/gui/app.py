@@ -32,6 +32,7 @@ from ..analysis import masking as MSK
 from ..batch import run_batch, summarise
 from ..io.gpda_write import from_session as write_dam_from_session
 from ..io.live import LiveLMF, refresh_session
+from ..physics import lineid
 from ..session import FitOptions, Session
 from .canvases import MapCanvas, SpectrumCanvas, toolbar_for
 
@@ -81,6 +82,9 @@ class MainWindow(QtWidgets.QMainWindow):
         a.addAction('&Fit', self.on_fit, 'Ctrl+F')
         a.addAction('&Quantify', self.on_quantify, 'Ctrl+Shift+Q')
         a.addAction('&Batch...', self.on_batch, 'Ctrl+B')
+        a.addSeparator()
+        a.addAction('&Identify peaks', self.on_identify, 'Ctrl+I')
+        a.addAction('&Suggest elements', self.on_suggest, 'Ctrl+D')
         a.addAction('Clear &mask', self.on_clear_mask)
         a.addSeparator()
         a.addAction('Check &calibration against known lines', self.on_check_cal)
@@ -150,6 +154,21 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (b1, b2, b3):
             row.addWidget(b)
         gl.addLayout(row)
+        row2 = QtWidgets.QHBoxLayout()
+        b4 = QtWidgets.QPushButton('Suggest from spectrum')
+        b4.setToolTip('Find peaks, then highlight the elements whose lines '
+                      'explain them. Highlighted entries are candidates, not '
+                      'conclusions.')
+        b4.clicked.connect(self.on_suggest)
+        b5 = QtWidgets.QPushButton('Accept suggested')
+        b5.clicked.connect(self.on_accept_suggested)
+        row2.addWidget(b4)
+        row2.addWidget(b5)
+        gl.addLayout(row2)
+        self.lbl_sugg = QtWidgets.QLabel('')
+        self.lbl_sugg.setWordWrap(True)
+        self.lbl_sugg.setStyleSheet('color:#0F766E; font-size:10px;')
+        gl.addWidget(self.lbl_sugg)
         v.addWidget(g)
 
         # -- detector efficiency
@@ -240,12 +259,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self._want_labels = True
         b_full = QtWidgets.QPushButton('Full range')
         b_full.clicked.connect(self.refresh_spectrum)
-        for x in (cb_log, cb_cmp, cb_lab, b_full):
+        self.chk_id = QtWidgets.QCheckBox('identify on click')
+        self.chk_id.setChecked(True)
+        self.chk_id.setToolTip('Click anywhere on the spectrum to list the '
+                               'X-ray lines near that energy.')
+        b_pk = QtWidgets.QPushButton('Find peaks')
+        b_pk.clicked.connect(self.on_identify)
+        for x in (cb_log, cb_cmp, cb_lab, b_full, self.chk_id, b_pk):
             bar.addWidget(x)
         bar.addStretch(1)
         sv.addWidget(toolbar_for(self.spec, sw))
         sv.addLayout(bar)
         sv.addWidget(self.spec, 1)
+        self.spec.mpl_connect('button_press_event', self.on_spec_click)
+        self._suggested = []
         tabs.addTab(sw, 'Spectrum')
 
         # map tab
@@ -605,6 +632,131 @@ class MainWindow(QtWidgets.QMainWindow):
         self.say('Exported %d files to %s:\n   %s'
                  % (len(w), d, '\n   '.join(w)))
         self.tabs.setCurrentIndex(3)
+
+    # -- line identification ---------------------------------------------
+
+    def on_spec_click(self, event):
+        """Click anywhere on the spectrum to see what lines sit there.
+
+        This is the tool you reach for when the residual shows something you
+        did not put in the model. It lists candidates, ranked - it does not
+        decide, because at any energy in a light-element spectrum there are
+        several honest answers and the fit is what distinguishes them.
+        """
+        if not self.chk_id.isChecked():
+            return
+        if event.inaxes is None or event.xdata is None:
+            return
+        if self.session.spectrum is None:
+            return
+        e = float(event.xdata)
+        cands = lineid.identify(self.session.db, e, window_eV=80.0, limit=8)
+        if not cands:
+            self.say('%.4f keV - nothing tabulated within 80 eV' % e)
+            return
+        lines = ['%.4f keV - candidate lines:' % e]
+        for c in cands:
+            mark = '  <' if abs(c.delta_eV) < 15 else ''
+            lines.append('   %-9s %8.4f keV  %+5.0f eV   rel.int %.3f%s'
+                         % (c.label(), c.energy, c.delta_eV, c.intensity, mark))
+        self.say(chr(10).join(lines))
+        self.status.showMessage('%.4f keV: %s' % (e, ', '.join(
+            c.label() for c in cands[:4])), 15000)
+
+    def on_identify(self):
+        """Find every significant peak and name the best candidate for each."""
+        s = self.session
+        if s.spectrum is None:
+            self.say('Nothing loaded.')
+            return
+        o = s.options
+        pk = lineid.find_peaks(s.spectrum, s.cal, background=s._bk,
+                               e_low=o.e_low, e_high=o.e_high, min_sigma=6.0)
+        if not pk:
+            self.say('No peaks above 6 sigma found.')
+            return
+        rows = ['%d peaks above 6 sigma:' % len(pk)]
+        for e, net, sg in pk:
+            c = lineid.identify(s.db, e, limit=3)
+            names = ', '.join(x.label() for x in c) if c else '(unidentified)'
+            rows.append('   %7.3f keV  net %9.0f  %6.1f sig   %s'
+                        % (e, net, sg, names))
+        self.say(chr(10).join(rows))
+        self._peaks = pk
+        self.tabs.setCurrentIndex(3)
+
+    def on_suggest(self):
+        """Highlight the elements whose lines explain the observed peaks.
+
+        Scoring rejects coincidences by insisting an element's STRONGEST
+        visible line is present and penalising lines that should be there and
+        are not - otherwise a dense heavy-element L series matches anything.
+        Matches are weighted by peak size, so explaining the dominant peak
+        counts for more than clipping a small one.
+
+        Treat the result as a shortlist. It is a starting point for a fit,
+        not a result.
+        """
+        s = self.session
+        if s.spectrum is None:
+            self.say('Nothing loaded.')
+            return
+        o = s.options
+        pk = lineid.find_peaks(s.spectrum, s.cal, background=s._bk,
+                               e_low=o.e_low, e_high=o.e_high, min_sigma=6.0)
+        sug = lineid.suggest_elements(s.db, pk, limit=18, min_score=0.4)
+        if not sug:
+            self.say('No elements scored above threshold.')
+            return
+        self._suggested = sug
+        self._highlight_suggested(sug)
+        rows = ['From %d peaks, %d candidate elements:' % (len(pk), len(sug))]
+        for sym, sh, sc, n in sug:
+            rows.append('   %-3s %s-shell   score %5.2f   %d line%s matched'
+                        % (sym, {1: 'K', 2: 'L', 3: 'M'}[sh], sc, n,
+                           '' if n == 1 else 's'))
+        rows.append('Highlighted in the element lists. These are candidates, '
+                    'not conclusions - add them and let the fit decide.')
+        self.say(chr(10).join(rows))
+        top = ', '.join('%s%s' % (sym, {1: '', 2: 'L', 3: 'M'}[sh])
+                        for sym, sh, _, _ in sug[:8])
+        self.lbl_sugg.setText('suggested: ' + top)
+
+    def _highlight_suggested(self, sug):
+        want = {}
+        for sym, sh, sc, n in sug:
+            want.setdefault(sh, {})[sym] = sc
+        for sh, lw in self.el_lists.items():
+            hits = want.get(sh, {})
+            for i in range(lw.count()):
+                it = lw.item(i)
+                sc = hits.get(it.text())
+                if sc:
+                    it.setBackground(QtGui.QBrush(QtGui.QColor('#CFF3EA')))
+                    it.setToolTip('suggested by the spectrum, score %.2f' % sc)
+                else:
+                    it.setBackground(QtGui.QBrush(QtGui.QColor(0, 0, 0, 0)))
+                    it.setToolTip('')
+
+    def on_accept_suggested(self):
+        """Select every highlighted element, so a fit can be run on them."""
+        if not self._suggested:
+            self.say('Run "Suggest from spectrum" first.')
+            return
+        want = {}
+        for sym, sh, sc, n in self._suggested:
+            want.setdefault(sh, set()).add(sym)
+        added = 0
+        for sh, lw in self.el_lists.items():
+            names = want.get(sh, set())
+            for i in range(lw.count()):
+                it = lw.item(i)
+                if it.text() in names and not it.isSelected():
+                    it.setSelected(True)
+                    added += 1
+        self.say('Selected %d suggested elements. Elements not in the default '
+                 'list are not added automatically - check the log for those.'
+                 % added)
 
     # -- efficiency and quantification ----------------------------------
 

@@ -33,5 +33,5 @@ the original:
     the element's own K lines before being believed
 """
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 __all__ = ['io', 'physics', 'fitting', 'analysis']
