@@ -1,6 +1,6 @@
 # scrappyFIT user manual
 
-Version 0.1.0
+Version 0.3.0
 
 Light-element PIXE spectrum fitting, mapping and quantification. Reads OMDAQ
 list-mode files and GeoPIXE's own formats, so it can be used alongside GeoPIXE
@@ -64,9 +64,9 @@ from PyPI.
 **A copy is vendored in the package**, so a fresh install works with no
 GeoPIXE present - including off a flash drive. Nothing needs configuring.
 
-To point at a different one (a newer GeoPIXE tree, say), scrappyFIT looks — the one containing `dat/` with
-`ElamDB12.txt`, `xray_lines*.txt`, `MAC_*.txt`, `xsect_K/L/M.txt` and
-`hubbell.dat`. It is found in this order:
+To point at a different one — a newer GeoPIXE tree, say — supply a directory
+containing `dat/` with `ElamDB12.txt`, `xray_lines*.txt`, `MAC_*.txt`,
+`xsect_K/L/M.txt` and `hubbell.dat`. Resolution order, first hit wins:
 
 1. a path passed to `config.set_database_path()`
 2. the `SCRAPPYFIT_DB` environment variable
