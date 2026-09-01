@@ -35,7 +35,9 @@ from .io import gpda as _gpda
 from .io import lmf as _lmf
 from .physics import lfix
 from .physics.efficiency import Efficiency, from_geopixe
+from .physics.escape import EscapeModel
 from .physics.gpdb import Database
+from .physics.geometry import Geometry
 from .physics.layers import Layer, LayeredYieldModel
 
 SHELL_SUFFIX = {1: '', 2: 'L', 3: 'M'}
@@ -88,6 +90,15 @@ class FitOptions:
         # invent an element. On quartz the Si+O sum at 2.24 keV is 488 counts
         # and gets assigned to mercury or niobium if it is not modelled.
         self.use_pileup = True
+        # Silicon escape peaks, tied to their parent component rather than
+        # fitted freely. Every line above the Si K edge produces one, so this
+        # is not an exotic correction - it is part of the response of any
+        # silicon detector, and a spectrum with calcium in it has a calcium
+        # escape peak at 1.95 keV whether or not anyone modelled it.
+        self.use_escape_peaks = True
+        self.crystal_Z = 14
+        self.crystal_thick_um = 500.0
+        self.escape_gamma = 1.0
         # 'strict' forbids negative areas. True reports them instead, which is
         # informative when deciding whether an element is present at all.
         self.nonneg = 'strict'
@@ -117,6 +128,8 @@ class Session:
         self._db_root = database
         self._db = None
         self.efficiency = None
+        self.geometry = Geometry()
+        self._escape = None
         self.reset_data()
 
     # -- database -------------------------------------------------------
@@ -130,9 +143,29 @@ class Session:
                 lfix.apply(self._db, verbose=False)
         return self._db
 
+    @property
+    def escape_model(self):
+        """Escape model for the current crystal, built lazily.
+
+        Thickness converts to areal density with silicon at 2.33 g/cm3, which
+        is what EscapeModel expects.
+        """
+        o = self.options
+        if not o.use_escape_peaks:
+            return None
+        key = (o.crystal_Z, o.crystal_thick_um, o.escape_gamma, o.mac)
+        if self._escape is None or getattr(self, '_escape_key', None) != key:
+            rho = 2.33 if o.crystal_Z == 14 else 5.32
+            areal = o.crystal_thick_um * 1e-4 * rho * 1000.0     # mg/cm2
+            self._escape = EscapeModel(self.db, o.crystal_Z, areal,
+                                       gamma=o.escape_gamma, mac_dataset=o.mac)
+            self._escape_key = key
+        return self._escape
+
     def set_lines_file(self, name):
         self.options.lines_file = name
         self._db = None
+        self._escape = None
         self.invalidate()
 
     # -- state ----------------------------------------------------------
@@ -340,7 +373,8 @@ class Session:
             lines = self.db.line_list(Z, sh)
             if not lines:
                 continue
-            c = _fit.Component(self.db.sym[Z] + SHELL_SUFFIX[sh], lines)
+            c = _fit.Component(self.db.sym[Z] + SHELL_SUFFIX[sh], lines,
+                               escape=self.escape_model)
             if sh == 2 and 21 <= Z <= 30:
                 c.tail_amp_fn = lambda E: 0.70
                 c.tail_len_fn = lambda E: 3.5
@@ -382,7 +416,7 @@ class Session:
     # -- quantification -------------------------------------------------
 
     def quantify(self, matrix=None, thickness=None, beam_MeV=1.0,
-                 theta_deg=135.0, normalise=True):
+                 theta_deg=135.0, normalise=True, absolute=False):
         """Fitted areas to weight percent.
 
         Needs three things beyond the fit: an efficiency curve, an assumed
@@ -435,11 +469,44 @@ class Session:
             if eff <= 0:
                 continue
             out[Z] = a * branch / (yy[Z] * eff)
-        if normalise and out:
+        if absolute:
+            # counts = concentration x yield x charge x solid angle x norm.
+            # No normalisation anywhere, so the SUM is a real measurement and
+            # a bad fit shows up as a total that is not 100%.
+            scale = self.geometry.scale()
+            out = {Z: v / scale for Z, v in out.items()}
+            self._conc_absolute = dict(out)
+            self._conc_sum = sum(out.values())
+        elif normalise and out:
             t = sum(out.values())
             out = {Z: 100.0 * v / t for Z, v in out.items()}
+            self._conc_absolute = None
+            self._conc_sum = None
         self._conc = out
         return out
+
+    def closure(self, **kw):
+        """The absolute sum, as a fraction of 100 wt%.
+
+        This is the diagnostic that normalising throws away. A fit that has
+        lost intensity to a mismodelled peak shape, or that is missing an
+        element, still sums to exactly 100% once normalised and looks
+        healthy. Absolutely, it does not.
+
+        Interpreting it:
+            0.95 - 1.05   consistent; the chain is holding together
+            below 0.9     something is missing - an unfitted element, dead
+                          time not corrected, or the charge read high
+            above 1.1     something is double counted, or the charge read
+                          low, or the solid angle is too small
+
+        None when the geometry is incomplete, because without charge and
+        solid angle there is nothing to compare against.
+        """
+        if not self.geometry.complete():
+            return None
+        self.quantify(absolute=True, **kw)
+        return self._conc_sum / 100.0
 
     def _bootstrap_matrix(self, zk, areas):
         """A first guess at the matrix from raw areas, used only to compute

@@ -266,6 +266,46 @@ class MainWindow(QtWidgets.QMainWindow):
             gl.addRow(c)
         v.addWidget(g)
 
+        # -- geometry, for absolute quantification -----------------------
+        gg = QtWidgets.QGroupBox('Charge and solid angle')
+        gg.setToolTip(
+            'Fill these in and QUANTIFY reports absolute weight percent '
+            'instead of normalising to 100. The sum then becomes a test: it '
+            'is only near 100 if the whole chain is right. Leave them blank '
+            'to normalise as before.')
+        ggl = QtWidgets.QFormLayout(gg)
+        self.ed_charge = QtWidgets.QLineEdit('')
+        self.ed_charge.setPlaceholderText('blank = normalise to 100')
+        self.ed_charge.setToolTip(
+            'Integrated beam charge in microcoulomb. The weakest link in the '
+            'chain: current read on the sample rather than in a Faraday cup '
+            'runs high unless secondary electrons are suppressed.')
+        self.ed_dist = QtWidgets.QLineEdit('')
+        self.ed_dist.setToolTip(
+            'Sample to detector face, mm. Enters as 1/r^2, so on a short '
+            'working distance a couple of mm of error is a large one.')
+        self.ed_area = QtWidgets.QLineEdit('')
+        self.ed_area.setToolTip('Active area in mm2 - how Amptek quotes it '
+                                '(25, 70). Use the collimated area if there '
+                                'is a collimator.')
+        self.ed_tilt = QtWidgets.QLineEdit('0')
+        self.ed_dead = QtWidgets.QLineEdit('0')
+        self.ed_dead.setToolTip(
+            'Dead time percent. Ignoring it makes every concentration low by '
+            'the same factor - invisible once normalised, obvious absolutely.')
+        self.lbl_omega = QtWidgets.QLabel('solid angle: -')
+        self.lbl_omega.setStyleSheet('color:#555')
+        for e in (self.ed_charge, self.ed_dist, self.ed_area, self.ed_tilt,
+                  self.ed_dead):
+            e.textChanged.connect(self._geom_changed)
+        ggl.addRow('charge uC', self.ed_charge)
+        ggl.addRow('distance mm', self.ed_dist)
+        ggl.addRow('active area mm2', self.ed_area)
+        ggl.addRow('detector tilt deg', self.ed_tilt)
+        ggl.addRow('dead time %', self.ed_dead)
+        ggl.addRow(self.lbl_omega)
+        v.addWidget(gg)
+
         row = QtWidgets.QHBoxLayout()
         self.btn_fit = QtWidgets.QPushButton('FIT')
         self.btn_fit.setMinimumHeight(34)
@@ -752,9 +792,16 @@ class MainWindow(QtWidgets.QMainWindow):
         def res(E):
             return float(np.sqrt(o.noise ** 2 + o.fano ** 2 * max(E, 0)))
 
+        # Prefer the model the fit is actually using over a fresh estimate.
+        # Escape and sum peaks are fitted components now, so the honest thing
+        # to show is what the fit did with them, not a separate prediction
+        # that may disagree with the curve already on screen.
+        em = s.escape_model if o.use_escape_peaks else None
+        fitted_pileup = s.areas().get('pileup')
         esc, sums, p = artefacts.predict(
             s.db, s.spectrum, s.cal, els, e_low=o.e_low, e_high=o.e_high,
-            areas=s.areas() or None, resolution=res)
+            areas=s.areas() or None, resolution=res,
+            escape_fraction=(em.fraction if em else None))
         marks = [('%s' % a.label, a.energy, '#7B3FA8') for a in esc]
         marks += [('%s' % a.label, a.energy, '#E07A00') for a in sums]
         if not marks:
@@ -765,9 +812,17 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.spec.set_markers(marks)
         rows = []
+        if fitted_pileup is not None:
+            tot = float(np.sum(s.spectrum))
+            rows.append('pile-up FITTED: %.0f counts (%.3g%% of the spectrum)'
+                        % (fitted_pileup, 100 * fitted_pileup / max(tot, 1)))
+        if em is not None:
+            rows.append('escape peaks FITTED, tied to their parents. Silicon '
+                        'prefactor omega_K(1-1/r)/2 = %.4f, gamma = %.3g'
+                        % (em.prefactor, em.gamma))
         if p is not None:
             rows.append('pile-up fraction inferred from the data: %.4g' % p)
-        else:
+        elif fitted_pileup is None:
             rows.append('pile-up fraction could not be measured - no clean '
                         'sum peak. Positions below are still valid; the '
                         'predicted counts are not.')
@@ -1017,6 +1072,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cmb_eff.addItem(os.path.basename(path), path)
         self.cmb_eff.setCurrentIndex(self.cmb_eff.count() - 1)
 
+    def _f(self, edit, default=None):
+        t = edit.text().strip()
+        if not t:
+            return default
+        try:
+            return float(t)
+        except ValueError:
+            return default
+
+    def _geom_changed(self, *_):
+        """Keep session.geometry in step with the boxes, and show the solid
+        angle as soon as it can be worked out - seeing it appear is the
+        cheapest check that the distance and area were entered sanely."""
+        from ..physics.geometry import live_fraction
+        g = self.session.geometry
+        g.charge_uC = self._f(self.ed_charge)
+        g.distance_mm = self._f(self.ed_dist)
+        g.area_mm2 = self._f(self.ed_area)
+        g.tilt_deg = self._f(self.ed_tilt, 0.0) or 0.0
+        g.live_fraction = live_fraction(dead_percent=self._f(self.ed_dead, 0.0))
+        o = g.solid_angle_msr
+        if o:
+            self.lbl_omega.setText(
+                'solid angle: %.3f msr   (%.4f%% of 4pi)'
+                % (o, 100 * o * 1e-3 / 12.566))
+        else:
+            self.lbl_omega.setText('solid angle: -')
+
     def on_quantify(self):
         s = self.session
         if s.fit is None:
@@ -1026,19 +1109,43 @@ class MainWindow(QtWidgets.QMainWindow):
             self.say('Select a detector efficiency curve first - without one '
                      'a peak area cannot become a concentration.')
             return
+        self._geom_changed()
+        absolute = s.geometry.complete()
         try:
             s.quantify(matrix=self.sample.matrix(),
                        thickness=self.sample.thickness(),
                        beam_MeV=self.sample.beam(),
-                       theta_deg=self.sample.theta())
+                       theta_deg=self.sample.theta(),
+                       normalise=not absolute, absolute=absolute)
         except Exception as ex:
             self.say('QUANTIFY FAILED: %s' % ex)
             return
         self.lbl_sm.setText(self._sample_summary())
         rows = s.concentration_table()
         body = chr(10).join('   %-3s %8.3f wt%%  +-%.1f%%' % r for r in rows)
-        self.say('Concentrations, normalised to 100 wt%% over K-shell '
-                 'elements:' + chr(10) + body)
+        if not absolute:
+            miss = ', '.join(s.geometry.missing())
+            self.say('Concentrations, NORMALISED to 100 wt%% over K-shell '
+                     'elements:' + chr(10) + body + chr(10) + chr(10) +
+                     'Normalised, so the total is 100 by construction and '
+                     'cannot test the fit. Fill in ' + miss + ' for an '
+                     'absolute total, which is the one number that catches a '
+                     'fit that has quietly lost intensity.')
+        else:
+            tot = s._conc_sum or 0.0
+            if tot < 90:
+                verdict = ('LOW. Intensity is unaccounted for: an element '
+                           'missing from the fit, dead time not corrected, '
+                           'or the charge reading high.')
+            elif tot > 110:
+                verdict = ('HIGH. Something is counted twice, or the charge '
+                           'reads low, or the solid angle is overstated.')
+            else:
+                verdict = 'consistent - the chain holds together.'
+            self.say('ABSOLUTE concentrations (no normalisation):'
+                     + chr(10) + body + chr(10) + chr(10) +
+                     'total %.1f wt%%  -  %s' % (tot, verdict) + chr(10) +
+                     s.geometry.describe())
         self.fill_table(s.fit)
         if s._conc:
             was_boot = self.sample.rb_boot.isChecked()

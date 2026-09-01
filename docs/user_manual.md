@@ -349,6 +349,104 @@ available but is not the default below Z = 10.
 
 ---
 
+## 4b. Charge, solid angle, and why the total matters
+
+### The one number that can fail
+
+Normalising to 100 wt% is the default because it cancels three things that are
+awkward to know: the solid angle, the charge, and the constant buried in
+atoms per gram. It is also a way to be confidently wrong. A fit that has lost
+a third of its intensity, or that is missing an element outright, still sums
+to exactly 100% afterwards and looks healthy.
+
+Measured on run 287427, a quartz, with everything else held fixed:
+
+| case | chi2 | normalised sum | absolute sum |
+|---|---|---|---|
+| everything modelled | 1.92 | 100.0% | 100.0% |
+| oxygen removed | 1385 | 100.0% | 32.4% |
+| aluminium removed | 2.71 | 100.0% | 97.2% |
+| shelf, tail, escape, pile-up off | 2.55 | 100.0% | 97.7% |
+
+The normalised column is 100.0 in every row, including the row where a major
+element is simply not in the model. Note also what normalising does to the
+survivors when oxygen is dropped: silicon goes from 41.7 to 62.4 wt% and
+fluorine from 0.40 to 36.8 wt%, both entirely spurious, and both reported
+with small fitting errors.
+
+In fairness, chi2 catches the oxygen case on its own. What chi2 cannot catch
+is a **scale** error, because the shape of the model is untouched:
+
+| case | chi2 | normalised sum | absolute sum |
+|---|---|---|---|
+| 20% dead time, not corrected | 1.922 | 100.0% | 125.0% |
+| charge digitiser reading 15% high | 1.922 | 100.0% | 87.0% |
+| detector really at 33 mm, assumed 30 | 1.922 | 100.0% | 121.0% |
+
+Identical chi2 to three decimal places, identical normalised result, and
+three different wrong answers. Only the absolute total moves. That is the
+argument for filling in the geometry panel.
+
+### Filling it in
+
+`counts = concentration x yield x Q x Omega x live`, so
+
+  - **charge, uC** - integrated beam dose. The weakest link. Current read on
+    the sample rather than in a suppressed Faraday cup runs high, sometimes
+    by tens of percent, because secondary electrons leaving the target count
+    as beam current arriving. Get this from a Faraday cup if at all possible.
+  - **distance, mm** - sample to detector face. Enters as 1/r^2, so at a
+    30 mm working distance 3 mm of error is 21%. Measure it, do not take it
+    from the drawing.
+  - **active area, mm2** - as the datasheet quotes it (Amptek: 25, 70). If
+    there is a collimator, the collimator's area is the one that counts.
+  - **dead time, %** - counts never recorded. This is not in the LMF (see
+    below), so it has to come from the OMDAQ run log. Ignoring it makes every
+    concentration low by the same factor: invisible normalised, obvious
+    absolutely.
+
+The panel shows the solid angle as soon as distance and area are both filled
+in. Seeing a plausible number appear - a few tens of msr for a close-coupled
+detector - is the cheapest check that neither was mistyped.
+
+### What the LMF does and does not give you
+
+`lmf.clocks()` reads the per-block header. Field 0 is a dose counter, and it
+is **digitiser pulses, not microcoulomb**; the conversion depends on the
+current-digitiser range in use, which the file does not record. So it gives
+relative charge exactly - useful for comparing two runs from one session -
+and absolute charge only once someone supplies uC per count.
+
+Fields 1 to 4 are four free-running clocks in microseconds. They track each
+other to within a few hundred microseconds across a 40-minute run, which
+rules out reading them as elapsed versus live: a live clock would fall behind
+by percent, not by microseconds. **Dead time is therefore not recoverable
+from the LMF.** `clocks()` returns `live_fraction = None` rather than
+inventing 1.0, because a fabricated 1.0 biases every absolute concentration
+low without saying so.
+
+### The honest route when charge is not trustworthy
+
+If the charge cannot be trusted - and often it cannot - do not abandon
+absolute work; move the calibration to something you can measure. Run a
+standard of known composition, use `Session.instrument_constant()` to get
+counts per unit yield from one element whose concentration you know, and
+apply that constant to the unknowns from the same session. That is what a
+standard is for, and it is why a measurement against one is worth more than
+an absolute calculation from first principles.
+
+### Reading the total
+
+| total | reading |
+|---|---|
+| 95-105% | consistent; the chain holds together |
+| below 90% | intensity unaccounted for: a missing element, uncorrected dead time, or charge reading high |
+| above 110% | something counted twice, charge reading low, or solid angle overstated |
+
+A total near 100% is not proof the analysis is right - two errors can cancel.
+It is a test the analysis can fail, which is more than a normalised total
+will ever offer.
+
 ## 5. Reading a result critically
 
 ### The screening tests

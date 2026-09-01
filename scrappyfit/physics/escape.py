@@ -11,7 +11,24 @@ that intensity into whatever real element happens to sit there.
                     Si  Ka_ = 1.740 keV   (no beta escape)
 
     EF = (1 - MU_DET*ln(1 + MU_E/MU_DET)/MU_E) / tanh(0.5*MU_E*D)
-    fraction = detector.gamma * EF * ba
+    fraction = PREFACTOR * gamma * EF * ba
+
+The PREFACTOR is the part escape_fraction.pro leaves in 'detector.GAMMA',
+which the detector definition file supplies. It is not a fudge - it is the
+probability that the absorption produced a K X-ray at all:
+
+    prefactor = omega_K * (1 - 1/r) / 2
+
+    omega_K   fluorescence yield of the crystal. Silicon is 0.0504
+              (Heirwegh 2014), so 95% of Si K vacancies emit an Auger
+              electron and never make an escaping photon.
+    (1 - 1/r) fraction of absorption events that hit the K shell rather than
+              L or M, from the jump ratio r. About 0.92 for silicon.
+    / 2       only photons heading outward can escape.
+
+Together that is about 0.023 for silicon. Omitting it - which is what taking
+GAMMA = 1 does - overstates the escape fraction by roughly forty times, and
+gives a calcium escape peak of 42% when the true value is near 1%.
 
     MU_DET  mass attenuation of the crystal at the escape energy
     MU_E    mass attenuation of the crystal at the line energy
@@ -51,6 +68,13 @@ class EscapeModel:
 
         self.k_edge = db.edge.get((self.Z, 'K'), 0.0)
 
+        # omega_K * (1 - 1/r) / 2, taken from the database rather than
+        # hard-coded, so a germanium crystal gets germanium's numbers.
+        wk = db.fluor_yield(self.Z, 'K', 'krause', 0)
+        jump = db.jump.get((self.Z, 'K'), 0.0)
+        kfrac = (1.0 - 1.0 / jump) if jump > 1.0 else 0.85
+        self.prefactor = 0.5 * float(wk) * float(kfrac)
+
     def _mu(self, E):
         if self.mac:
             m = self.db.mu(self.Z, E, self.mac)
@@ -80,7 +104,7 @@ class EscapeModel:
         D = self.thick * 0.001 / ct          # mg/cm^2 -> g/cm^2
         ef = ((1.0 - mu_det * np.log(1.0 + mu_e / mu_det) / mu_e)
               / np.tanh(0.5 * mu_e * D))
-        return float(self.gamma * ef * ba)
+        return float(self.prefactor * self.gamma * ef * ba)
 
     def escape_lines(self, lines, tilt_deg=0.0, min_frac=1e-5):
         """Given [(E, intensity), ...] return the escape lines they produce.

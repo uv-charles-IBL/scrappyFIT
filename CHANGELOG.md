@@ -4,6 +4,45 @@ Versions follow [semantic versioning](https://semver.org). Physics changes
 that alter fitted numbers are always called out, because a result is only
 reproducible against a stated version.
 
+## 0.8.0 - artefacts in the fit, and absolute quantification
+
+### Physics that changes fitted numbers
+- **Silicon escape peaks are now fitted components**, tied to their parent
+  line rather than free. The escape fraction follows `escape_fraction.pro`,
+  but with the prefactor that GeoPIXE keeps in `detector.GAMMA` written out
+  explicitly: `omega_K * (1 - 1/r) / 2`, taken from the database so a
+  germanium crystal gets germanium's numbers. For silicon this is 0.0229.
+  Treating `GAMMA` as 1, which is the obvious reading of the IDL, gives a
+  calcium escape fraction of 42% instead of 0.96%.
+- **Pile-up is a fitted component** with a free amplitude and a shape that is
+  the self-convolution of everything else, so it follows the other components
+  instead of being a fixed correction applied afterwards.
+- Escape peaks are correctly absent below the Si K edge at 1.839 keV, so no
+  light-element line generates one.
+
+### Absolute quantification
+- `physics/geometry.py`: solid angle, dead-time live fraction, and the
+  `calc_yield.pro` normalisation constant, so a result can be reported in
+  weight percent without normalising to 100.
+- `Session.quantify(absolute=True)` and `Session.closure()`, the diagnostic
+  that a normalised total cannot provide.
+- GUI: a "Charge and solid angle" panel. Filled in, QUANTIFY reports absolute
+  concentrations and judges the total; left blank, it normalises as before
+  and says so.
+
+### File formats
+- `lmf.clocks()` returns the per-block dose counter and the run duration.
+  Field 0 is digitiser pulses, not microcoulomb - the conversion is not in
+  the file. Fields 1-4 are four microsecond clocks that track each other to
+  within ~500 us, so **dead time cannot be recovered from an LMF** and the
+  function returns `live_fraction = None` rather than a fabricated 1.0.
+
+### Fixed
+- The artefact button now reports the escape and pile-up terms the fit
+  actually used, instead of an independent prediction that could disagree
+  with the curve on screen.
+
+
 ## 0.1.0 - first cut
 
 Extracted from a working session against GeoPIXE and reorganised into a
