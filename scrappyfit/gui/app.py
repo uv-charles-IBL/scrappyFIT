@@ -527,6 +527,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if s.events is None:
             self.say('  no event positions in this format - maps and masking '
                      'are unavailable (open the .lmf for those)')
+        # Charge, if it can be had without asking. The run log beside the data
+        # is the measurement; the LMF dose counter is a good proxy but carries
+        # whatever digitiser range was set. Say which was used either way, so
+        # nobody mistakes the proxy for the measurement.
+        q, src = s.auto_charge()
+        if q:
+            self.ed_charge.setText('%.4f' % q)
+            self.say('  charge %.4f uC, from the %s' % (q, src))
+            if src != 'run log':
+                self.say('  (0.1 nC per count, measured on the Dec-2023 '
+                         'session - confirm it against the run log for '
+                         'this one)')
+        else:
+            self.say('  no charge available (%s) - QUANTIFY will normalise '
+                     'to 100 wt%% unless you type one in' % src)
+        self._geom_changed()
         self.refresh_spectrum()
 
     def on_adc_changed(self):
