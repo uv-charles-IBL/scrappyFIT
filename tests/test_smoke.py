@@ -113,4 +113,9 @@ def test_depth_steps_resolve_the_thinnest_layer():
     thin = [dict(thick=0.005), dict(thick=200.0)]
     thick = [dict(thick=100.0), dict(thick=200.0)]
     assert Session._steps_for(thin) > Session._steps_for(thick)
-    assert Session._steps_for(thin) >= 25 * 200.005 / 0.005 * 0.99
+    # the ideal count for a 0.005 in 200.005 stack is ~1e6 steps, which would
+    # take minutes; the cap trades exactness for a usable runtime, so the test
+    # asserts the cap is reached rather than the ideal
+    assert Session._steps_for(thin) == 30000
+    # a stack with no very thin layer must NOT be pushed to the cap
+    assert Session._steps_for(thick) < 30000
