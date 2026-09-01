@@ -88,3 +88,34 @@ def test_silicon_escape_prefactor_and_magnitude():
     # monotonically falling once above the edge
     for lo, hi in ((2.014, 2.622), (2.622, 3.692), (3.692, 6.404)):
         assert em.fraction(lo) > em.fraction(hi)
+
+
+# ------------------------------------------------- the yield unit constant
+
+def test_yield_to_geopixe_decomposes_into_its_factors():
+    """The constant that was wrong by 60x. Assert the factors, not the
+    number, so a future edit to one of them cannot quietly move it."""
+    from scrappyfit.physics.geometry import (FOUR_PI, IONS_PER_MICROCOULOMB,
+                                             MSR, PPM_PER_WT_PERCENT,
+                                             YIELD_TO_GEOPIXE)
+    expect = 1.0e21 * 1.0e-6 * IONS_PER_MICROCOULOMB * MSR / FOUR_PI
+    assert YIELD_TO_GEOPIXE == pytest.approx(expect, rel=1e-12)
+    assert YIELD_TO_GEOPIXE == pytest.approx(4.9671e23, rel=1e-3)
+    assert PPM_PER_WT_PERCENT == 1.0e4
+
+
+def test_scale_does_not_use_geopixes_own_constant():
+    """calc_yield.pro's constant carries Avogadro because GeoPIXE's yield
+    integral does not. Ours does, via N_A_over_A. Using GeoPIXE's constant
+    here counts Avogadro twice; this pins the two apart."""
+    from scrappyfit.physics.geometry import (yield_normalisation,
+                                             PPM_PER_WT_PERCENT,
+                                             YIELD_TO_GEOPIXE)
+    g = Geometry(charge_uC=1.0, area_mm2=25.0, distance_mm=30.0)
+    wrong = 1.0 * g.solid_angle_msr * yield_normalisation()
+    assert g.scale() == pytest.approx(
+        g.solid_angle_msr * YIELD_TO_GEOPIXE * PPM_PER_WT_PERCENT, rel=1e-12)
+    # 60.2 against the derived constant; 61.6 against the one measured
+    # from a GeoPIXE .yield file. The 2% between them is cross-section
+    # interpolation, and is the honest size of the agreement.
+    assert wrong / g.scale() == pytest.approx(60.22, rel=0.01)

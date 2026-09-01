@@ -90,6 +90,38 @@ def solid_angle_from_area(area_mm2, distance_mm, tilt_deg=0.0):
             / (distance_mm ** 2)) * 1000.0
 
 
+# ----------------------------------------------------------------- the fix
+#
+# yield_normalisation() below is a faithful port of calc_yield.pro, and it is
+# the WRONG constant for this package's yield model. GeoPIXE's yield integral
+# does not carry atoms per gram, so calc_yield.pro supplies Avogadro itself.
+# physics/yields.py DOES carry it, as N_A_over_A(). Using GeoPIXE's constant
+# on this model therefore counts Avogadro twice, and gets the depth and
+# concentration units wrong as well. The net error was a factor of 61.6, in
+# the direction that makes every absolute concentration too small.
+#
+# The right constant for THIS model, derived term by term:
+#
+#   1e21    yields.py multiplies by N_A_over_A, which is Avogadro x 1e-24,
+#           and integrates over a depth in mg/cm2 rather than g/cm2 (x 1e3).
+#           So its output is the true 4pi yield per unit mass fraction x 1e-21
+#   1e-6    GeoPIXE quotes yields per ppm, not per unit mass fraction
+#   6.2418e12   protons per microcoulomb
+#   1e-3    one millisteradian expressed in steradian
+#   / 4pi   the yield above is into the whole sphere
+#
+# Checked, not just derived: running LayeredYieldModel on the layer model
+# inside a GeoPIXE .yield file and dividing GeoPIXE's stored yields by ours
+# gives 4.859e23 with a 2.0% spread over Z = 15-30, against the 4.967e23
+# below - agreement to 2.2%, the remainder being cross-section interpolation.
+# The two were computed independently, so this is a real check on both.
+
+YIELD_TO_GEOPIXE = 1.0e21 * 1.0e-6 * IONS_PER_MICROCOULOMB * MSR / FOUR_PI
+"""Converts a yields.py yield into GeoPIXE's counts per ppm per uC per msr."""
+
+PPM_PER_WT_PERCENT = 1.0e4
+
+
 def yield_normalisation(cos_beam=1.0, charge_state=1.0):
     """The constant that turns a bare cross-section integral into
     counts per ppm per uC per msr, exactly as calc_yield.pro forms it.
@@ -160,13 +192,19 @@ class Geometry:
         return m
 
     def scale(self):
-        """counts = concentration x yield x THIS."""
+        """counts = concentration_in_wt_percent x yield x THIS.
+
+        Uses YIELD_TO_GEOPIXE, not yield_normalisation - see the note above
+        that constant. A concentration is divided by this, so every factor
+        here that is too large makes the answer too small.
+        """
         if not self.complete():
             raise ValueError('absolute quantification needs: '
                              + ', '.join(self.missing()))
+        cb = max(abs(self.cos_beam), 1e-6)
         return (self.charge_uC * self.solid_angle_msr
-                * yield_normalisation(self.cos_beam, self.charge_state)
-                * self.live_fraction)
+                * YIELD_TO_GEOPIXE * PPM_PER_WT_PERCENT
+                * self.live_fraction / (cb * float(self.charge_state)))
 
     def describe(self):
         o = self.solid_angle_msr
