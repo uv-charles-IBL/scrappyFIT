@@ -24,10 +24,16 @@ from matplotlib.widgets import RectangleSelector, SpanSelector
 from PyQt5 import QtCore, QtWidgets
 
 INK = '#151A22'
-DATA = '#151A22'
-MODEL = '#A8323F'
-BACK = '#0F766E'
-COMP = '#3B82F6'
+DATA = '#3C3C3C'          # data sits back so the model reads on top of it
+MODEL = '#D01C1F'         # the fit, the line you check first
+BACK = '#00857A'          # background
+COMP = '#1F4FD8'          # individual components
+
+# Components are drawn in a rotating palette rather than one colour. With ten
+# overlapping elements a single hue is an unreadable thicket, and telling
+# which component is which is most of what the plot is for.
+COMP_CYCLE = ['#1F4FD8', '#E07A00', '#7B3FA8', '#00873E', '#C4187A',
+              '#0F8FA8', '#8A6D00', '#B03030']
 
 
 class SpectrumCanvas(FigureCanvasQTAgg):
@@ -101,33 +107,38 @@ class SpectrumCanvas(FigureCanvasQTAgg):
         self.ax.clear()
         self.axr.clear()
 
-        self.ax.step(E, y, where='mid', lw=0.8, color=DATA, label='data')
+        self.ax.step(E, y, where='mid', lw=0.9, color=DATA, alpha=0.85,
+                     label='data')
         if bk is not None:
             n = min(len(E), len(bk))
-            self.ax.plot(E[:n], bk[:n], lw=1.0, ls='--', color=BACK,
+            self.ax.plot(E[:n], bk[:n], lw=1.4, ls='--', color=BACK,
                          label='background')
         if r is not None:
             n = min(len(E), len(r.model))
-            self.ax.plot(E[:n], r.model[:n], lw=1.3, color=MODEL,
-                         label='fit  chi2r=%.2f' % r.reduced_chi2)
             if self._show_comps and bk is not None:
                 base = bk[:n]
+                k = 0
                 for i, nm in enumerate(r.names):
                     if r.areas[i] <= 0:
                         continue
                     c = r.profiles[:n, i] * r.areas[i]
                     if c.max() < 0.003 * max(y.max(), 1):
                         continue
-                    self.ax.plot(E[:n], c + base, lw=0.6, alpha=0.55,
-                                 color=COMP)
+                    col = COMP_CYCLE[k % len(COMP_CYCLE)]
+                    k += 1
+                    self.ax.plot(E[:n], c + base, lw=1.0, alpha=0.75,
+                                 color=col)
+            # the model is drawn LAST so it is never buried under a component
+            self.ax.plot(E[:n], r.model[:n], lw=1.8, color=MODEL, zorder=4,
+                         label='fit  chi2r=%.2f' % r.reduced_chi2)
             sg = np.sqrt(np.maximum(r.model[:n], 1.0))
             d = (y[:n] - r.model[:n]) / sg
             self.axr.fill_between(E[:n], 0, d, where=d > 0, step='mid',
-                                  color=MODEL, alpha=0.45)
+                                  color=MODEL, alpha=0.55)
             self.axr.fill_between(E[:n], 0, d, where=d <= 0, step='mid',
-                                  color='#2B6CB0', alpha=0.35)
-            self.axr.step(E[:n], d, where='mid', lw=0.6, color=INK)
-            self.axr.axhspan(-2, 2, color='0.9', zorder=0)
+                                  color='#1F4FD8', alpha=0.45)
+            self.axr.step(E[:n], d, where='mid', lw=0.7, color=INK)
+            self.axr.axhspan(-2, 2, color='#DCDCDC', zorder=0)
             self.axr.set_ylim(-10, 10)
 
         # decide the visible window FIRST, so that nothing drawn afterwards

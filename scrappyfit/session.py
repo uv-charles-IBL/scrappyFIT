@@ -81,6 +81,13 @@ class FitOptions:
         self.use_escape_step = True
         self.use_contact_step = True
         self.use_window_step = False
+        # Sum-peak pile-up. Two photons inside the shaping time are recorded
+        # as one event at the sum of their energies. It is small - a few
+        # tenths of a percent on a bright spectrum - but it lands in empty
+        # regions where nothing else is, so it is exactly where a fit will
+        # invent an element. On quartz the Si+O sum at 2.24 keV is 488 counts
+        # and gets assigned to mercury or niobium if it is not modelled.
+        self.use_pileup = True
         # 'strict' forbids negative areas. True reports them instead, which is
         # informative when deciding whether an element is present at all.
         self.nonneg = 'strict'
@@ -351,6 +358,8 @@ class Session:
         comps = self.build_components(elements)
         if not comps:
             raise ValueError('no fittable components in %r' % (elements,))
+        if o.use_pileup:
+            comps.append(_fit.PileupComponent(comps))
         self._fit = _fit.fit_spectrum(
             self.spectrum, a, b, comps, o.e_low, o.e_high,
             noise=o.noise, fano=o.fano, tail_amp=o.tail_amp,

@@ -37,6 +37,7 @@ from ..physics import lineid
 from ..session import FitOptions, Session
 from .canvases import MapCanvas, SpectrumCanvas, toolbar_for
 from .dialogs import ElementDialog, SampleModelDialog
+from .layerview import LayerStackDialog
 
 # The element lists are not a fixed menu. They are rebuilt from the working
 # energy range, so every element with a line you could actually detect is
@@ -115,6 +116,8 @@ class MainWindow(QtWidgets.QMainWindow):
         a.addAction('&Fit', self.on_fit, 'Ctrl+F')
         a.addAction('&Quantify', self.on_quantify, 'Ctrl+Shift+Q')
         a.addAction('Sample &model...', self.on_sample_model)
+        a.addAction('&Layer stack and escape...', self.on_layers,
+                    'Ctrl+L')
         a.addAction('&Batch...', self.on_batch, 'Ctrl+B')
         a.addSeparator()
         a.addAction('&Identify peaks', self.on_identify, 'Ctrl+I')
@@ -196,6 +199,11 @@ class MainWindow(QtWidgets.QMainWindow):
         b_sm = QtWidgets.QPushButton('Matrix and thickness...')
         b_sm.clicked.connect(self.on_sample_model)
         gl.addWidget(b_sm)
+        b_ly = QtWidgets.QPushButton('Layer stack and escape...')
+        b_ly.setToolTip('Draw the stack and ask what fraction of a given '
+                        'X-ray escapes from each layer.')
+        b_ly.clicked.connect(self.on_layers)
+        gl.addWidget(b_ly)
         self.lbl_sm = QtWidgets.QLabel('matrix bootstrapped from the fit, '
                                        'thick target, 1.0 MeV, 135 deg')
         self.lbl_sm.setWordWrap(True)
@@ -241,6 +249,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_contact.setChecked(o.use_contact_step)
         self.chk_window = QtWidgets.QCheckBox('Si3N4 window (N K edge)')
         self.chk_window.setChecked(o.use_window_step)
+        self.chk_pileup = QtWidgets.QCheckBox('Model sum-peak pile-up')
+        self.chk_pileup.setChecked(o.use_pileup)
+        self.chk_pileup.setToolTip(
+            'Two photons inside the shaping time are recorded as one at the '
+            'sum energy. Small, but it lands in empty regions - exactly where '
+            'a fit will otherwise invent an element.')
         self.chk_nonneg = QtWidgets.QCheckBox('Forbid negative areas')
         self.chk_nonneg.setChecked(o.nonneg == 'strict')
         gl.addRow('E low keV', self.ed_elo)
@@ -248,7 +262,7 @@ class MainWindow(QtWidgets.QMainWindow):
         gl.addRow('MAC dataset', self.cmb_mac)
         gl.addRow('Line data', self.cmb_lines)
         for c in (self.chk_escape, self.chk_contact, self.chk_window,
-                  self.chk_nonneg):
+                  self.chk_pileup, self.chk_nonneg):
             gl.addRow(c)
         v.addWidget(g)
 
@@ -436,6 +450,7 @@ class MainWindow(QtWidgets.QMainWindow):
         o.use_escape_step = self.chk_escape.isChecked()
         o.use_contact_step = self.chk_contact.isChecked()
         o.use_window_step = self.chk_window.isChecked()
+        o.use_pileup = self.chk_pileup.isChecked()
         o.nonneg = 'strict' if self.chk_nonneg.isChecked() else True
         self.session.invalidate()
 
@@ -761,6 +776,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_elements_changed(self):
         self.lbl_els.setText('selected: ' + self.elements.table.summary())
+
+    def on_layers(self):
+        if not hasattr(self, 'layerview'):
+            self.layerview = LayerStackDialog(self.session, self)
+        self.layerview.show()
+        self.layerview.raise_()
+        self.layerview.activateWindow()
 
     def on_sample_model(self):
         self.sample.show()

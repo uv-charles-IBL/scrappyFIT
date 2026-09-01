@@ -142,3 +142,24 @@ element has a line nearby. On a chondrite that produced 13,425 counts of
   go in a sidecar .provenance.json rather than being silently lost.
 - Fixed: the x-axis was not clamped, so a guide for a line outside the window
   stretched the plot to 78 keV.
+
+## 0.6.0 - pile-up, contrast, layer stack viewer
+
+- **Sum-peak pile-up is now a fitted component.** Two photons inside the
+  shaping time record as one at the sum energy. Small - 0.27% of counts on
+  quartz - but it lands in otherwise empty regions, which is exactly where a
+  fit invents an element. The unexplained 2.24 keV peak in the quartz
+  spectrum was the Si Ka + O Ka sum, and was being offered to mercury and
+  niobium. Confirmed three ways: energy 2.235 against 2.265 predicted, FWHM
+  107 eV against 53 for a single line, and a Si+O to Si+Si ratio of 1.90
+  against 1.67 predicted. Modelling it took chi2r from 2.105 to 1.925.
+- **Higher contrast plotting.** Components now cycle through eight colours
+  rather than sharing one, the model is drawn last so it is never buried, and
+  line weights are heavier. With ten overlapping elements a single hue was an
+  unreadable thicket.
+- **Layer stack viewer** (Ctrl+L). Draws the stack on a log thickness scale -
+  the perovskite cell spans 0.002 to 2200 um and is meaningless linearly -
+  and computes what fraction of a chosen X-ray escapes from each layer. On
+  that cell: Pb Ma escapes 99.97% from the absorber, O Ka escapes 0.086%.
+  Reports the mean free path against the layer thickness and warns when only
+  the top of a layer is being sampled.

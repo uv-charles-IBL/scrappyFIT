@@ -78,6 +78,41 @@ def pileup_component(components, pars, n_channels, areas=None, ratio=1.0):
     return ratio * full / max(m.sum(), 1.0)
 
 
+class PileupComponent:
+    """Pile-up as a fittable component with a free amplitude.
+
+    Its shape is the self-convolution of every OTHER component, so it moves
+    when they do and carries no free shape parameters of its own - only how
+    much of it there is, which is what the count rate sets and what the fit
+    should determine.
+
+    Being a component rather than a fixed correction matters: pile-up sits in
+    otherwise empty regions of the spectrum, which is precisely where a fit
+    with nothing better to offer will place a spurious element. Modelling it
+    removes that opportunity instead of leaving it open.
+    """
+
+    name = 'pileup'
+
+    def __init__(self, components):
+        self._src = list(components)
+        self.tail_amp_fn = lambda E: 0.0
+        self.tail_len_fn = lambda E: 0.0
+
+    def profile(self, pars, n_channels):
+        m = np.zeros(n_channels)
+        for c in self._src:
+            m += c.profile(pars, n_channels)
+        t = m.sum()
+        if t <= 0:
+            return m
+        # unit-area self-convolution, so the fitted amplitude is directly the
+        # number of pile-up counts
+        full = np.convolve(m / t, m / t)[:n_channels]
+        ssum = full.sum()
+        return full / ssum if ssum > 0 else full
+
+
 class FitResult:
     def __init__(self, areas, errors, names, chi2, ndf, model, background,
                  pars, profiles):
