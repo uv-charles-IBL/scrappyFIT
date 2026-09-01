@@ -57,3 +57,27 @@ element has a line nearby. On a chondrite that produced 13,425 counts of
 - The binary GeoPIXE `.spec` format is not read yet, only the text export
 - Shelf slopes are fixed; fitting them per energy needs monochromatic spectra
 - No OMDAQ live connection
+
+## 0.2.0 - efficiency, batch, masks, interop, live
+
+- **Detector efficiency curves** (`physics/efficiency.py`). Reads GeoPIXE EFF3
+  exports in both layouts; three curves vendored. `from_layers()` computes one
+  from an absorber stack for what-if questions. `Session.quantify()` turns
+  fitted areas into wt%, validated on quartz: O 53.79 against a true 53.26.
+- **Batch processing** (`batch.py`). One option set across many files, a
+  per-run export plus one wide `batch_summary.csv`. Failures are recorded and
+  the batch continues.
+- **Mask tools** (`analysis/masking.py`). Flood fill with a relative
+  tolerance, polygon, grow, shrink, boolean combination. Flood tested on the
+  fluorine inclusions in 287427: 15x F and 7x Al enrichment over the field.
+- **DA matrix writing** (`io/gpda_write.py`). scrappyFIT results can now go
+  back into GeoPIXE. Round-trips to 100.51 wt% on quartz against quantify()'s
+  own answer. Note the charge convention: GeoPIXE applies a matrix as
+  `matrix . spectrum / charge`, so the stored weights must carry a factor of
+  charge or every concentration is silently out by the run's charge.
+- **Live list-mode reading** (`io/live.py`). An LMF is a header plus complete
+  8192-byte blocks, so a reader can consume whole blocks as they land with no
+  locking and no cooperation from OMDAQ. Verified against a simulated growing
+  file: 599,294 events, identical to a static read.
+- GUI: efficiency selector, QUANTIFY, wt% column, Batch dialog, DA export,
+  live attach with a 1 s poll, flood/grow/shrink mask tools.

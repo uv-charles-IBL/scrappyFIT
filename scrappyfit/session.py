@@ -34,7 +34,9 @@ from .fitting.background import snip
 from .io import gpda as _gpda
 from .io import lmf as _lmf
 from .physics import lfix
+from .physics.efficiency import Efficiency, from_geopixe
 from .physics.gpdb import Database
+from .physics.layers import Layer, LayeredYieldModel
 
 SHELL_SUFFIX = {1: '', 2: 'L', 3: 'M'}
 
@@ -107,6 +109,7 @@ class Session:
         self.options = options or FitOptions()
         self._db_root = database
         self._db = None
+        self.efficiency = None
         self.reset_data()
 
     # -- database -------------------------------------------------------
@@ -141,9 +144,26 @@ class Session:
         self.dam = None
         self.invalidate()
 
+    # -- detector efficiency --------------------------------------------
+
+    def load_efficiency(self, path):
+        """A fitted area is not a concentration until this is known. At
+        carbon Ka a C1 window transmits about 3%, so the same peak area means
+        thirty times more carbon than it would silicon."""
+        self.efficiency = from_geopixe(path)
+        self._conc = None
+        return self.efficiency
+
+    def builtin_efficiencies(self):
+        import glob
+        import pathlib
+        d = pathlib.Path(__file__).parent / 'resources' / 'efficiency'
+        return sorted(glob.glob(str(d / '*.txt')))
+
     def invalidate(self):
         self._bk = None
         self._fit = None
+        self._conc = None
         self._meta = []
 
     # -- loading --------------------------------------------------------
@@ -350,6 +370,96 @@ class Session:
         return {} if self._fit is None else dict(
             zip(self._fit.names, self._fit.errors))
 
+    # -- quantification -------------------------------------------------
+
+    def quantify(self, matrix=None, thickness=None, beam_MeV=1.0,
+                 theta_deg=135.0, normalise=True):
+        """Fitted areas to weight percent.
+
+        Needs three things beyond the fit: an efficiency curve, an assumed
+        matrix, and a thickness. The matrix matters because self-absorption
+        is computed through it - which makes this mildly circular, so it is
+        iterated once from a first-pass estimate unless you supply one.
+
+        matrix     {Z: weight_fraction} or None to bootstrap from the areas
+        thickness  mg/cm2; None means thick target (larger than the range)
+        normalise  scale the result to sum to 100 wt%. Almost always what you
+                   want, and it cancels the solid angle and charge constants
+                   that are not otherwise known. Turn it off only if you have
+                   an absolute calibration.
+
+        Returns {Z: wt%}. K-shell elements only - the yield model has no L or
+        M ionisation cross sections, so an L-fitted element is deliberately
+        absent rather than silently wrong.
+        """
+        if self._fit is None:
+            raise RuntimeError('fit first')
+        if self.efficiency is None:
+            raise RuntimeError('load a detector efficiency curve first; '
+                               'without it areas cannot become concentrations')
+        ar = self.areas()
+        zk = [Z for (Z, sh) in self._meta if sh == 1]
+        if not zk:
+            raise RuntimeError('no K-shell components in this fit')
+
+        if matrix is None:
+            matrix = self._bootstrap_matrix(zk, ar)
+        mz = list(matrix.keys())
+        mw = [matrix[z] for z in mz]
+        thick = thickness if thickness else 1e4      # thick target
+
+        lym = LayeredYieldModel(self.db)
+        lay = Layer(mz, mw, thick, 'matrix')
+        yy = lym.yields([lay], zk, E0=beam_MeV, theta_deg=theta_deg,
+                        mac=self.options.mac, fy=self.options.fluor_yield,
+                        elam_zmax=self.options.fluor_elam_zmax, n_steps=900)
+        self._yield_detail = getattr(lym, 'last_detail', {})
+
+        out = {}
+        for Z in zk:
+            nm = self.db.sym[Z]
+            a = ar.get(nm, 0.0)
+            if a <= 0 or not np.isfinite(yy.get(Z, np.nan)) or yy[Z] <= 0:
+                continue
+            branch = max(i for _, i in self.db.line_list(Z, 1))
+            eff = self.efficiency(self.db.line_energy(Z))
+            if eff <= 0:
+                continue
+            out[Z] = a * branch / (yy[Z] * eff)
+        if normalise and out:
+            t = sum(out.values())
+            out = {Z: 100.0 * v / t for Z, v in out.items()}
+        self._conc = out
+        return out
+
+    def _bootstrap_matrix(self, zk, areas):
+        """A first guess at the matrix from raw areas, used only to compute
+        self-absorption. Crude on purpose - the result is iterated once by
+        quantify() being called again with the answer, and the absorption
+        correction is not very sensitive to a rough matrix."""
+        w = {}
+        for Z in zk:
+            a = areas.get(self.db.sym[Z], 0.0)
+            if a > 0:
+                w[Z] = a
+        if not w:
+            return {14: 1.0}
+        t = sum(w.values())
+        return {Z: v / t for Z, v in w.items()}
+
+    def concentration_table(self):
+        """[(symbol, wt%, relative error %)] sorted by abundance."""
+        if not self._conc:
+            return []
+        er = self.errors()
+        ar = self.areas()
+        rows = []
+        for Z, c in self._conc.items():
+            nm = self.db.sym[Z]
+            rel = (100 * er.get(nm, 0) / ar[nm]) if ar.get(nm) else float('nan')
+            rows.append((nm, c, rel))
+        return sorted(rows, key=lambda r: -r[1])
+
     # -- export ---------------------------------------------------------
 
     def export(self, folder, prefix=None):
@@ -405,11 +515,20 @@ class Session:
             calibration=dict(gain=self.cal[0], offset=self.cal[1]),
             charge=self.charge, mask=self.mask_name or None,
             chi2_reduced=(r.reduced_chi2 if r is not None else None),
+            efficiency=(self.efficiency.source if self.efficiency else None),
             database=str(config.database_path(required=False)),
             options=self.options.to_dict(),
             scrappyfit_version=scrappyfit.__version__)
         (out / ('%s_analysis.json' % pre)).write_text(json.dumps(meta, indent=2))
         written.append('%s_analysis.json' % pre)
+
+        if self._conc:
+            rows = ['# element   wt_percent   rel_error_percent']
+            for nm, c, rel in self.concentration_table():
+                rows.append('%-8s %12.4f %14.2f' % (nm, c, rel))
+            (out / ('%s_concentrations.txt' % pre)).write_text(
+                chr(10).join(rows) + chr(10))
+            written.append('%s_concentrations.txt' % pre)
 
         if self.mask is not None:
             np.save(out / ('%s_mask.npy' % pre), self.mask)

@@ -28,6 +28,10 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .. import __version__, config
+from ..analysis import masking as MSK
+from ..batch import run_batch, summarise
+from ..io.gpda_write import from_session as write_dam_from_session
+from ..io.live import LiveLMF, refresh_session
 from ..session import FitOptions, Session
 from .canvases import MapCanvas, SpectrumCanvas, toolbar_for
 
@@ -67,12 +71,16 @@ class MainWindow(QtWidgets.QMainWindow):
         f = m.addMenu('&File')
         f.addAction('&Open...', self.on_open, 'Ctrl+O')
         f.addAction('Set &database folder...', self.on_set_db)
+        f.addAction('Attach to &live file...', self.on_attach_live)
         f.addSeparator()
         f.addAction('&Export analysis...', self.on_export, 'Ctrl+E')
+        f.addAction('Export &DA matrix (.dam)...', self.on_export_dam)
         f.addSeparator()
         f.addAction('&Quit', self.close, 'Ctrl+Q')
         a = m.addMenu('&Analysis')
         a.addAction('&Fit', self.on_fit, 'Ctrl+F')
+        a.addAction('&Quantify', self.on_quantify, 'Ctrl+Shift+Q')
+        a.addAction('&Batch...', self.on_batch, 'Ctrl+B')
         a.addAction('Clear &mask', self.on_clear_mask)
         a.addSeparator()
         a.addAction('Check &calibration against known lines', self.on_check_cal)
@@ -144,6 +152,25 @@ class MainWindow(QtWidgets.QMainWindow):
         gl.addLayout(row)
         v.addWidget(g)
 
+        # -- detector efficiency
+        g = QtWidgets.QGroupBox('Detector efficiency')
+        gl = QtWidgets.QVBoxLayout(g)
+        self.cmb_eff = QtWidgets.QComboBox()
+        self.cmb_eff.addItem('(none - areas only)')
+        for pth in self.session.builtin_efficiencies():
+            self.cmb_eff.addItem(os.path.basename(pth), pth)
+        self.cmb_eff.currentIndexChanged.connect(self.on_eff_changed)
+        b_eff = QtWidgets.QPushButton('Load curve from file...')
+        b_eff.clicked.connect(self.on_load_eff)
+        gl.addWidget(self.cmb_eff)
+        gl.addWidget(b_eff)
+        note = QtWidgets.QLabel('Needed for concentrations. At C Ka a C1 '
+                                'window transmits about 3%.')
+        note.setWordWrap(True)
+        note.setStyleSheet('color:#666; font-size:10px;')
+        gl.addWidget(note)
+        v.addWidget(g)
+
         # -- options
         g = QtWidgets.QGroupBox('Fit options')
         gl = QtWidgets.QFormLayout(g)
@@ -174,10 +201,16 @@ class MainWindow(QtWidgets.QMainWindow):
             gl.addRow(c)
         v.addWidget(g)
 
+        row = QtWidgets.QHBoxLayout()
         self.btn_fit = QtWidgets.QPushButton('FIT')
         self.btn_fit.setMinimumHeight(34)
         self.btn_fit.clicked.connect(self.on_fit)
-        v.addWidget(self.btn_fit)
+        self.btn_q = QtWidgets.QPushButton('QUANTIFY')
+        self.btn_q.setMinimumHeight(34)
+        self.btn_q.clicked.connect(self.on_quantify)
+        row.addWidget(self.btn_fit, 2)
+        row.addWidget(self.btn_q, 1)
+        v.addLayout(row)
         v.addStretch(1)
 
         sc = QtWidgets.QScrollArea()
@@ -236,6 +269,17 @@ class MainWindow(QtWidgets.QMainWindow):
         b_thr.clicked.connect(self.on_threshold)
         b_clr = QtWidgets.QPushButton('Clear mask')
         b_clr.clicked.connect(self.on_clear_mask)
+        self.cmb_mode = QtWidgets.QComboBox()
+        self.cmb_mode.addItems(['rectangle', 'flood fill'])
+        self.cmb_mode.currentTextChanged.connect(self.on_mode_changed)
+        self.spin_tol = QtWidgets.QDoubleSpinBox()
+        self.spin_tol.setRange(0.02, 3.0)
+        self.spin_tol.setSingleStep(0.05)
+        self.spin_tol.setValue(0.35)
+        b_grow = QtWidgets.QPushButton('grow')
+        b_grow.clicked.connect(lambda: self.on_morph(1))
+        b_shrink = QtWidgets.QPushButton('shrink')
+        b_shrink.clicked.connect(lambda: self.on_morph(-1))
         for x, lab in ((self.cmb_mapel, 'element'), (self.spin_bin, 'binning'),
                        (self.spin_thr, 'percentile')):
             top.addWidget(QtWidgets.QLabel(lab))
@@ -243,20 +287,31 @@ class MainWindow(QtWidgets.QMainWindow):
         top.addWidget(self.chk_sub)
         top.addWidget(b_map)
         top.addWidget(b_thr)
-        top.addWidget(b_clr)
         top.addStretch(1)
+        row2 = QtWidgets.QHBoxLayout()
+        row2.addWidget(QtWidgets.QLabel('mask tool'))
+        row2.addWidget(self.cmb_mode)
+        row2.addWidget(QtWidgets.QLabel('flood tolerance'))
+        row2.addWidget(self.spin_tol)
+        row2.addWidget(b_grow)
+        row2.addWidget(b_shrink)
+        row2.addWidget(b_clr)
+        row2.addStretch(1)
         self.map = MapCanvas()
         self.map.regionSelected.connect(self.on_region)
         mv.addLayout(top)
+        mv.addLayout(row2)
         mv.addWidget(self.map, 1)
+        self.map.mpl_connect('button_press_event', self.on_map_click)
+        self._last_mask = None
         tabs.addTab(mw, 'Maps')
 
         # results tab
         rw = QtWidgets.QWidget()
         rv = QtWidgets.QVBoxLayout(rw)
-        self.table = QtWidgets.QTableWidget(0, 4)
+        self.table = QtWidgets.QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ['component', 'area', 'error', 'rel %'])
+            ['component', 'area', 'error', 'rel %', 'wt %'])
         self.table.horizontalHeader().setStretchLastSection(True)
         rv.addWidget(self.table)
         tabs.addTab(rw, 'Results')
@@ -421,11 +476,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_spectrum()
 
     def fill_table(self, r):
+        conc = {}
+        if getattr(self.session, '_conc', None):
+            conc = {self.session.db.sym[Z]: v
+                    for Z, v in self.session._conc.items()}
         rows = sorted(zip(r.names, r.areas, r.errors), key=lambda t: -t[1])
         self.table.setRowCount(len(rows))
         for i, (nm, a, e) in enumerate(rows):
             rel = '%.1f' % (100 * e / a) if a > 0 else '-'
-            for j, txt in enumerate((nm, '%.0f' % a, '%.0f' % e, rel)):
+            wt = '%.3f' % conc[nm] if nm in conc else ''
+            for j, txt in enumerate((nm, '%.0f' % a, '%.0f' % e, rel, wt)):
                 it = QtWidgets.QTableWidgetItem(txt)
                 if a <= 0:
                     it.setForeground(QtGui.QBrush(QtGui.QColor('#999')))
@@ -545,6 +605,195 @@ class MainWindow(QtWidgets.QMainWindow):
         self.say('Exported %d files to %s:\n   %s'
                  % (len(w), d, '\n   '.join(w)))
         self.tabs.setCurrentIndex(3)
+
+    # -- efficiency and quantification ----------------------------------
+
+    def on_eff_changed(self, idx):
+        path = self.cmb_eff.itemData(idx)
+        if not path:
+            self.session.efficiency = None
+            self.say('Efficiency cleared - areas only, no concentrations.')
+            return
+        try:
+            e = self.session.load_efficiency(path)
+        except Exception as ex:
+            self.say('EFFICIENCY FAILED: %s' % ex)
+            return
+        self.say('Efficiency: %s  (C Ka %.4f, Si Ka %.3f, Fe Ka %.3f)'
+                 % (e.name, e(0.277), e(1.740), e(6.404)))
+
+    def on_load_eff(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Detector efficiency curve', '', 'Text (*.txt);;All (*)')
+        if not path:
+            return
+        self.cmb_eff.addItem(os.path.basename(path), path)
+        self.cmb_eff.setCurrentIndex(self.cmb_eff.count() - 1)
+
+    def on_quantify(self):
+        s = self.session
+        if s.fit is None:
+            self.say('Fit first.')
+            return
+        if s.efficiency is None:
+            self.say('Select a detector efficiency curve first - without one '
+                     'a peak area cannot become a concentration.')
+            return
+        try:
+            s.quantify()
+        except Exception as ex:
+            self.say('QUANTIFY FAILED: %s' % ex)
+            return
+        rows = s.concentration_table()
+        body = chr(10).join('   %-3s %8.3f wt%%  +-%.1f%%' % r for r in rows)
+        self.say('Concentrations, normalised to 100 wt%% over K-shell '
+                 'elements:' + chr(10) + body)
+        self.fill_table(s.fit)
+        self.tabs.setCurrentIndex(2)
+
+    # -- mask tools ------------------------------------------------------
+
+    def on_mode_changed(self, mode):
+        self.map._sel.set_active(mode == 'rectangle')
+        extra = '  (click a pixel to seed)' if mode == 'flood fill' else ''
+        self.say('Mask tool: %s%s' % (mode, extra))
+
+    def on_map_click(self, event):
+        if self.cmb_mode.currentText() != 'flood fill':
+            return
+        if event.inaxes is not self.map.ax or event.xdata is None:
+            return
+        data = self.map._data
+        if data is None:
+            return
+        m = MSK.flood(data, (int(event.xdata), int(event.ydata)),
+                      tolerance=self.spin_tol.value())
+        if not m.any():
+            self.say('Flood found nothing there - widen the tolerance.')
+            return
+        self._apply_mask(m, 'flood')
+
+    def on_morph(self, direction):
+        if self._last_mask is None:
+            self.say('Make a mask first.')
+            return
+        m = (MSK.grow(self._last_mask, 1) if direction > 0
+             else MSK.shrink(self._last_mask, 1))
+        self._apply_mask(m, self.session.mask_name or 'mask')
+
+    def _apply_mask(self, m, name):
+        try:
+            n = self.session.set_mask(m, name)
+        except Exception as ex:
+            self.say('MASK FAILED: %s' % ex)
+            return
+        self._last_mask = m
+        self.say('%s mask: %s, %d events. Refit to analyse it.'
+                 % (name, MSK.describe(m), n))
+        self.refresh_spectrum()
+
+    # -- batch -----------------------------------------------------------
+
+    def on_batch(self):
+        els = self.selected_elements()
+        if not els:
+            self.say('Select elements first - a batch applies one set to '
+                     'every file.')
+            return
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, 'Choose files to process', '',
+            'All supported (*.lmf *.dam *.spec *.txt);;All files (*)')
+        if not paths:
+            return
+        out = QtWidgets.QFileDialog.getExistingDirectory(
+            self, 'Where should the results go?')
+        if not out:
+            return
+        self.apply_options()
+        cal = None
+        ask = QtWidgets.QMessageBox.question(
+            self, 'Calibration',
+            'Force the current calibration on every file?' + chr(10) + chr(10)
+            + 'Usually yes - they were acquired on one setup, and it removes '
+              'a per-file variable from the comparison.',
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        if ask == QtWidgets.QMessageBox.Yes:
+            cal = self.session.cal
+        eff = self.cmb_eff.itemData(self.cmb_eff.currentIndex())
+        prog = QtWidgets.QProgressDialog('Processing...', 'Cancel', 0,
+                                         len(paths), self)
+        prog.setWindowModality(QtCore.Qt.WindowModal)
+
+        def tick(i, n, path):
+            prog.setValue(i)
+            prog.setLabelText(os.path.basename(path))
+            QtWidgets.QApplication.processEvents()
+
+        try:
+            res = run_batch(paths, els, out, options=self.session.options,
+                            calibration=cal, efficiency=eff,
+                            adc=self.spin_adc.value(),
+                            quantify=bool(eff), progress=tick)
+        except Exception as ex:
+            self.say('BATCH FAILED: %s' % ex)
+            return
+        finally:
+            prog.setValue(len(paths))
+        self.say('Batch complete.' + chr(10) + summarise(res) + chr(10)
+                 + 'Summary table: %s'
+                 % os.path.join(out, 'batch_summary.csv'))
+        self.tabs.setCurrentIndex(3)
+
+    # -- interop and live -------------------------------------------------
+
+    def on_export_dam(self):
+        s = self.session
+        if s.fit is None:
+            self.say('Fit first - a DA matrix is built from the fitted '
+                     'component shapes.')
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, 'Write DA matrix', '', 'GeoPIXE DA matrix (*.dam)')
+        if not path:
+            return
+        try:
+            write_dam_from_session(s, path)
+        except Exception as ex:
+            self.say('DAM EXPORT FAILED: %s' % ex)
+            return
+        units = 'ppm' if s.efficiency is not None else 'area units'
+        self.say('Wrote %s in %s. GeoPIXE can load this and project maps '
+                 'with it.' % (os.path.basename(path), units))
+
+    def on_attach_live(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Attach to a list-mode file being written', '',
+            'OMDAQ list mode (*.lmf)')
+        if not path:
+            return
+        try:
+            self._live = LiveLMF(path)
+            self._live.poll()
+            refresh_session(self.session, self._live, self.spin_adc.value())
+        except Exception as ex:
+            self.say('ATTACH FAILED: %s' % ex)
+            return
+        self.lbl_file.setText('%s [LIVE]' % os.path.basename(path))
+        self.say('Attached: %s' % self._live.status())
+        if not hasattr(self, '_live_timer'):
+            self._live_timer = QtCore.QTimer(self)
+            self._live_timer.timeout.connect(self._live_tick)
+        self._live_timer.start(1000)
+        self.refresh_spectrum()
+
+    def _live_tick(self):
+        r = getattr(self, '_live', None)
+        if r is None:
+            return
+        if r.poll():
+            refresh_session(self.session, r, self.spin_adc.value())
+            self.refresh_spectrum()
+            self.status.showMessage('LIVE: ' + r.status())
 
     def on_about(self):
         QtWidgets.QMessageBox.about(
