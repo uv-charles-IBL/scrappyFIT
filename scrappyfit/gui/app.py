@@ -33,7 +33,7 @@ from ..batch import run_batch, summarise
 from ..io.gpda_write import from_session as write_dam_from_session
 from ..io.gpyield_write import from_session as write_yield_from_session
 from ..io.live import LiveLMF, refresh_session
-from ..physics import lineid
+from ..physics import artefacts, lineid
 from ..session import FitOptions, Session
 from .canvases import MapCanvas, SpectrumCanvas, toolbar_for
 from .dialogs import ElementDialog, SampleModelDialog
@@ -315,10 +315,16 @@ class MainWindow(QtWidgets.QMainWindow):
         b_lab.setToolTip('Annotate every detected peak with its best '
                          'identification, ready for export.')
         b_lab.clicked.connect(self.on_label_peaks)
+        b_art = QtWidgets.QPushButton('Show escape + sum peaks')
+        b_art.setToolTip('Mark where silicon escape peaks and pile-up sum '
+                         'peaks fall. Both put real features where no element '
+                         'emits, and a fit offered one will reach for the '
+                         'nearest element.')
+        b_art.clicked.connect(self.on_artefacts)
         b_nomark = QtWidgets.QPushButton('Clear markers')
         b_nomark.clicked.connect(lambda: self.spec.clear_markers())
         for x in (cb_log, cb_cmp, cb_lab, b_full, self.chk_id, b_pk,
-                  b_lab, b_nomark):
+                  b_lab, b_art, b_nomark):
             bar.addWidget(x)
         bar.addStretch(1)
         sv.addWidget(toolbar_for(self.spec, sw))
@@ -723,6 +729,68 @@ class MainWindow(QtWidgets.QMainWindow):
         self.say('Labelled %d peaks (%d unidentified). Teal = an element in '
                  'the current fit, red = suggested by the line table only.'
                  % (len(marks), unknown))
+
+    def on_artefacts(self):
+        """Mark predicted escape and sum peaks.
+
+        These are the two places a spectrum has a real, sharp feature that no
+        element produced. Knowing where they are before choosing elements is
+        the cheapest way to avoid fitting a fake line - the 2.24 keV Si+O sum
+        in a quartz spectrum was otherwise being handed to mercury.
+        """
+        s = self.session
+        if s.spectrum is None:
+            self.say('Nothing loaded.')
+            return
+        els = self.selected_elements()
+        if not els:
+            self.say('Select some elements first - artefacts are predicted '
+                     'from the lines you expect.')
+            return
+        o = s.options
+
+        def res(E):
+            return float(np.sqrt(o.noise ** 2 + o.fano ** 2 * max(E, 0)))
+
+        esc, sums, p = artefacts.predict(
+            s.db, s.spectrum, s.cal, els, e_low=o.e_low, e_high=o.e_high,
+            areas=s.areas() or None, resolution=res)
+        marks = [('%s' % a.label, a.energy, '#7B3FA8') for a in esc]
+        marks += [('%s' % a.label, a.energy, '#E07A00') for a in sums]
+        if not marks:
+            self.say('No escape or sum peaks fall inside %.2f-%.2f keV. '
+                     'Escape peaks need a parent above the Si K edge at '
+                     '1.839 keV, so a purely light-element spectrum has none.'
+                     % (o.e_low, o.e_high))
+            return
+        self.spec.set_markers(marks)
+        rows = []
+        if p is not None:
+            rows.append('pile-up fraction inferred from the data: %.4g' % p)
+        else:
+            rows.append('pile-up fraction could not be measured - no clean '
+                        'sum peak. Positions below are still valid; the '
+                        'predicted counts are not.')
+        if esc:
+            rows.append('')
+            rows.append('silicon escape peaks (purple):')
+            for a in esc:
+                rows.append('   %-14s %7.4f keV   ~%.0f counts'
+                            % (a.label, a.energy, a.intensity))
+        if sums:
+            rows.append('')
+            rows.append('sum peaks (orange):')
+            for a in sorted(sums, key=lambda x: -(x.intensity or 0))[:12]:
+                extra = ('   FWHM ~%.0f eV (a real line here would be %.0f)'
+                         % (a.fwhm_eV, res(a.energy))) if a.fwhm_eV else ''
+                rows.append('   %-14s %7.4f keV   ~%.0f counts%s'
+                            % (a.label, a.energy, a.intensity or 0, extra))
+        rows.append('')
+        rows.append('A feature at one of these energies needs no element. '
+                    'Tick "Model sum-peak pile-up" to have the fit account '
+                    'for the sums directly.')
+        self.say(chr(10).join(rows))
+        self.tabs.setCurrentIndex(3)
 
     def on_save_image(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(

@@ -68,3 +68,49 @@ def test_fit_runs_and_is_reproducible():
     r = s.run_fit(['C', 'N', 'O', 'F', 'Na', 'Mg', 'Al', 'Si'])
     assert np.isfinite(r.reduced_chi2)
     assert s.areas()['Si'] > s.areas()['Al'] * 10
+
+
+def test_escape_peaks_need_a_parent_above_the_si_edge():
+    """No light element can produce a silicon escape peak. If one appears in
+    the prediction, an energy comparison is inverted somewhere."""
+    from scrappyfit.physics import artefacts
+    lines = [('C', 0.277, 1e5), ('O', 0.525, 1e5), ('Si', 1.740, 1e6),
+             ('Ca', 3.692, 1e5)]
+    esc = artefacts.escape_peaks(lines, min_counts=0.0)
+    got = {a.parents[0] for a in esc}
+    assert 'C' not in got and 'O' not in got and 'Si' not in got
+    assert 'Ca' in got
+    ca = next(a for a in esc if a.parents[0] == 'Ca')
+    assert abs(ca.energy - (3.692 - artefacts.SI_KA)) < 1e-6
+
+
+def test_sum_peak_positions_and_width():
+    """A sum peak sits at the sum energy and is wider than either parent."""
+    from scrappyfit.physics import artefacts
+    lines = [('O', 0.525, 1e6), ('Si', 1.740, 1e6)]
+    res = lambda E: (32.74 ** 2 + 28.05 ** 2 * E) ** 0.5
+    sums = artefacts.sum_peaks(lines, pileup_fraction=1e-3,
+                               total_counts=1e7, resolution=res)
+    by = {a.label: a for a in sums}
+    assert abs(by['O+Si'].energy - 2.265) < 1e-6
+    assert by['O+Si'].fwhm_eV > res(2.265)
+
+
+def test_layered_thickness_is_standard_calibrated():
+    """Without an internal standard a thickness is not determinable, and the
+    API must require one rather than returning arbitrary units."""
+    import inspect
+    from scrappyfit.session import Session
+    sig = inspect.signature(Session.solve_thickness)
+    for p in ('ref_Z', 'ref_layer', 'ref_wt_percent'):
+        assert p in sig.parameters
+
+
+def test_depth_steps_resolve_the_thinnest_layer():
+    """A layer thinner than one integration step returns the same yield
+    however thin it is, which silently breaks any thickness solve."""
+    from scrappyfit.session import Session
+    thin = [dict(thick=0.005), dict(thick=200.0)]
+    thick = [dict(thick=100.0), dict(thick=200.0)]
+    assert Session._steps_for(thin) > Session._steps_for(thick)
+    assert Session._steps_for(thin) >= 25 * 200.005 / 0.005 * 0.99

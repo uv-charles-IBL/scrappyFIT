@@ -469,6 +469,217 @@ class Session:
             rows.append((nm, c, rel))
         return sorted(rows, key=lambda r: -r[1])
 
+    # -- layered quantification -----------------------------------------
+
+    def quantify_layered(self, layers, assignment, beam_MeV=1.0,
+                         theta_deg=135.0, normalise_within_layer=True):
+        """Concentrations for a layered sample.
+
+        What is and is not determinable
+        -------------------------------
+        One spectrum cannot give both the composition and the thickness of
+        every layer. There are more unknowns than measurements and no amount
+        of fitting fixes that, so something has to be supplied. Three cases
+        are tractable:
+
+          1. known stack, unknown concentrations - thicknesses and matrix
+             compositions given, solve for how much of each element sits in
+             the layer it is assigned to. That is this method.
+          2. known compositions, one unknown thickness - solve for that
+             instead, with solve_thickness() below.
+          3. a film on a known substrate - case 2 with one layer, the common
+             one, giving an areal density rather than a concentration.
+
+        The degeneracy that matters
+        ---------------------------
+        An element present in more than one layer CANNOT be separated from a
+        single spectrum. Carbon in a surface film and carbon in a buried
+        organic layer make the same peak; only their attenuation differs, and
+        that is one equation for two unknowns. So `assignment` is required
+        rather than inferred - you are stating where you believe each element
+        lives, and the answer is only as good as that belief.
+
+        layers      [dict(zlist=, wfrac=, thick=)] surface first, mg/cm2
+        assignment  {Z: layer_index}
+
+        Returns {Z: wt% within its own layer}.
+        """
+        if self._fit is None:
+            raise RuntimeError('fit first')
+        if self.efficiency is None:
+            raise RuntimeError('load a detector efficiency curve first')
+
+        stack = [Layer(L['zlist'], L['wfrac'], L['thick'],
+                       L.get('name', 'layer%d' % i))
+                 for i, L in enumerate(layers)]
+        ar = self.areas()
+        zk = [Z for (Z, sh) in self._meta if sh == 1]
+        lym = LayeredYieldModel(self.db)
+
+        out, detail = {}, {}
+        for Z in zk:
+            nm = self.db.sym[Z]
+            a = ar.get(nm, 0.0)
+            k = assignment.get(Z)
+            if a <= 0 or k is None:
+                continue
+            yy = lym.yields(stack, [Z], E0=beam_MeV, theta_deg=theta_deg,
+                            mac=self.options.mac, fy=self.options.fluor_yield,
+                            elam_zmax=self.options.fluor_elam_zmax,
+                            n_steps=self._steps_for(layers),
+                            in_layer={Z: k})
+            y = yy.get(Z, 0.0)
+            if not np.isfinite(y) or y <= 0:
+                detail[Z] = 'no yield - the line may be wholly absorbed'
+                continue
+            branch = max(i for _, i in self.db.line_list(Z, 1))
+            eff = self.efficiency(self.db.line_energy(Z))
+            if eff <= 0:
+                continue
+            out[Z] = a * branch / (y * eff)
+            d = dict(getattr(lym, 'last_detail', {}).get(Z, {}) or {})
+            d['layer'] = k
+            detail[Z] = d
+
+        if normalise_within_layer:
+            by_layer = {}
+            for Z in out:
+                by_layer.setdefault(assignment[Z], []).append(Z)
+            for zs in by_layer.values():
+                t = sum(out[Z] for Z in zs)
+                if t > 0:
+                    for Z in zs:
+                        out[Z] = 100.0 * out[Z] / t
+        self._conc = out
+        self._layer_detail = detail
+        self._layer_assignment = dict(assignment)
+        return out
+
+    @staticmethod
+    def _steps_for(layers, base=900, per_layer=25, cap=30000):
+        """Depth steps enough to resolve the THINNEST layer.
+
+        The yield integral walks the stack in equal energy-loss steps. A layer
+        thinner than one step gets one step's worth of yield no matter how
+        thin it is, so the model silently floors out - a 5 ug/cm2 film and a
+        50 ug/cm2 film return the same answer, and a thickness solve then has
+        nothing to bisect on. This picks a step count that puts at least
+        `per_layer` steps inside the thinnest layer.
+        """
+        t = [float(L.get('thick', 0.0)) for L in layers
+             if float(L.get('thick', 0.0)) > 0]
+        if not t:
+            return base
+        total = sum(t)
+        need = int(per_layer * total / min(t))
+        return int(min(max(base, need), cap))
+
+    def instrument_constant(self, layers, ref_Z, ref_layer, ref_wt_percent,
+                            beam_MeV=1.0, theta_deg=135.0):
+        """Counts per unit (yield x efficiency x weight fraction).
+
+        The yield model returns X-rays per unit concentration in arbitrary
+        units - it knows the physics but not the solid angle, the charge, or
+        the constant hidden in atoms-per-gram. quantify() never needs that
+        constant because normalising to 100 wt% cancels it.
+
+        An absolute quantity cannot be normalised away, so anything absolute -
+        a film thickness, an areal density - needs the constant measured. The
+        practical way is an internal standard: one element whose concentration
+        in a known layer you already know. That is what a standard IS, and it
+        is why a measurement against one is worth more than an absolute
+        calculation.
+        """
+        if self._fit is None:
+            raise RuntimeError('fit first')
+        if self.efficiency is None:
+            raise RuntimeError('load a detector efficiency curve first')
+        nm = self.db.sym[ref_Z]
+        area = self.areas().get(nm, 0.0)
+        if area <= 0:
+            raise ValueError('reference element %s has no fitted area' % nm)
+        stack = [Layer(L['zlist'], L['wfrac'], L['thick'], L.get('name', ''))
+                 for L in layers]
+        lym = LayeredYieldModel(self.db)
+        yy = lym.yields(stack, [ref_Z], E0=beam_MeV, theta_deg=theta_deg,
+                        mac=self.options.mac, fy=self.options.fluor_yield,
+                        elam_zmax=self.options.fluor_elam_zmax,
+                        n_steps=self._steps_for(layers),
+                        in_layer={ref_Z: ref_layer})
+        y = yy.get(ref_Z, 0.0)
+        if not np.isfinite(y) or y <= 0:
+            raise ValueError('reference %s has no computable yield in layer %d'
+                             % (nm, ref_layer))
+        branch = max(i for _, i in self.db.line_list(ref_Z, 1))
+        eff = self.efficiency(self.db.line_energy(ref_Z))
+        return area * branch / (y * eff * (ref_wt_percent / 100.0))
+
+    def solve_thickness(self, layers, unknown_index, element_Z,
+                        known_wt_percent, ref_Z, ref_layer, ref_wt_percent,
+                        beam_MeV=1.0, theta_deg=135.0,
+                        bracket=(1e-6, 1e3), tol=1e-3):
+        """Thickness of one layer, calibrated against an internal standard.
+
+        The complement of quantify_layered. Instead of asking how much of an
+        element sits in a layer of known thickness, ask how thick a layer of
+        known composition must be to produce the observed peak. That is the
+        right question for a film - a carbon coat has a composition you
+        already know and a thickness you do not.
+
+        ref_Z / ref_layer / ref_wt_percent name the internal standard, which
+        supplies the instrument constant (see instrument_constant). Without
+        one the answer would be in arbitrary units, so it is required rather
+        than optional.
+
+        Bisection on log thickness: yield is monotonic in thickness at fixed
+        composition, and the plausible range spans decades.
+        """
+        k = self.instrument_constant(layers, ref_Z, ref_layer, ref_wt_percent,
+                                     beam_MeV, theta_deg)
+        nm = self.db.sym[element_Z]
+        target = self.areas().get(nm, 0.0)
+        if target <= 0:
+            raise ValueError('%s has no fitted area' % nm)
+        branch = max(i for _, i in self.db.line_list(element_Z, 1))
+        eff = self.efficiency(self.db.line_energy(element_Z))
+        lym = LayeredYieldModel(self.db)
+
+        def predicted(t):
+            ls = [dict(L) for L in layers]
+            ls[unknown_index]['thick'] = t
+            stack = [Layer(L['zlist'], L['wfrac'], L['thick'],
+                           L.get('name', '')) for L in ls]
+            yy = lym.yields(stack, [element_Z], E0=beam_MeV,
+                            theta_deg=theta_deg, mac=self.options.mac,
+                            fy=self.options.fluor_yield,
+                            elam_zmax=self.options.fluor_elam_zmax,
+                            n_steps=self._steps_for(ls),
+                            in_layer={element_Z: unknown_index})
+            y = yy.get(element_Z, 0.0)
+            if not np.isfinite(y) or y <= 0:
+                return 0.0
+            return k * y * eff * (known_wt_percent / 100.0) / branch
+
+        lo, hi = bracket
+        flo = predicted(lo) - target
+        fhi = predicted(hi) - target
+        if flo * fhi > 0:
+            raise ValueError(
+                'no thickness between %.4g and %.4g mg/cm2 reproduces the '
+                'observed %s area of %.0f counts (the model spans %.4g to '
+                '%.4g). Check the assumed composition or the standard.'
+                % (lo, hi, nm, target, predicted(lo), predicted(hi)))
+        for _ in range(60):
+            mid = float(np.sqrt(lo * hi))
+            fm = predicted(mid) - target
+            if abs(fm) < tol * target:
+                return mid
+            if flo * fm <= 0:
+                hi, fhi = mid, fm
+            else:
+                lo, flo = mid, fm
+        return float(np.sqrt(lo * hi))
+
     # -- export ---------------------------------------------------------
 
     def export(self, folder, prefix=None):

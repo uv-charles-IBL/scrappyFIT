@@ -163,3 +163,27 @@ element has a line nearby. On a chondrite that produced 13,425 counts of
   that cell: Pb Ma escapes 99.97% from the absorber, O Ka escapes 0.086%.
   Reports the mean free path against the layer thickness and warns when only
   the top of a layer is being sampled.
+
+## 0.7.0 - artefact prediction and layered quantification
+
+- **Show escape + sum peaks** button. Marks where silicon escape peaks and
+  pile-up sums fall, before any element is chosen. Both put real sharp
+  features where no element emits, and a fit offered one reaches for the
+  nearest element. Predictions on quartz match measurement to 1%: O+Si sum
+  predicted 484 counts at 2.265 keV, measured 488 at 2.235.
+  The pile-up fraction is INFERRED from a clean sum peak in the data rather
+  than assumed, and reported as unavailable when no clean one exists.
+- **Layered quantification.** `quantify_layered()` for known stack / unknown
+  concentrations, `solve_thickness()` for known composition / unknown
+  thickness, and `instrument_constant()` underneath both.
+- **solve_thickness requires an internal standard**, because it must. The
+  yield model returns arbitrary units; quantify() cancels that by normalising
+  to 100 wt%, but an absolute thickness cannot be normalised away. One
+  element of known concentration in a known layer supplies the constant.
+- **Adaptive depth stepping.** A layer thinner than one integration step
+  returned the same yield however thin it was - a 5 and a 50 ug/cm2 film gave
+  identical answers and a thickness solve had nothing to bisect on. Step count
+  now scales so the thinnest layer gets at least 25 steps.
+- Validated on the salt rock carbon film: 5.42 ug/cm2 calibrated on chlorine,
+  5.54 on sodium (2.1% apart), against 5.6 from the independent
+  internal-standard route earlier in the project.
