@@ -36,12 +36,36 @@ from ..physics import lineid
 from ..session import FitOptions, Session
 from .canvases import MapCanvas, SpectrumCanvas, toolbar_for
 
-# Elements offered by default. K lines for everything light, plus the L and M
-# entries that actually appear in a 6.6 keV window.
-DEFAULT_K = ['C', 'N', 'O', 'F', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl',
-             'K', 'Ca', 'Ti', 'Cr', 'Mn', 'Fe', 'Ni', 'Cu', 'Zn']
-DEFAULT_L = ['Fe', 'Ni', 'Cu', 'Zn', 'Br', 'Ag', 'In', 'Sn', 'I']
-DEFAULT_M = ['Au', 'Hg', 'Pb']
+# The element lists are not a fixed menu. They are rebuilt from the working
+# energy range, so every element with a line you could actually detect is
+# there and nothing you could detect is missing. A fixed list is worse than
+# useless on an unknown sample: it silently rules out whatever the author did
+# not anticipate.
+SHELL_NAMES = {1: 'K', 2: 'L', 3: 'M'}
+
+# Sensible starting selections, not limits on what is available.
+PRESET_LIGHT = ['C', 'N', 'O', 'F', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl',
+                'K', 'Ca']
+PRESET_SILICATE = ['C', 'N', 'O', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl',
+                   'K', 'Ca', 'Ti', 'Cr', 'Mn', 'Fe']
+
+
+def elements_in_range(db, shell, e_low, e_high, min_intensity=0.05):
+    """Every element whose given shell puts a usable line inside the window.
+
+    'Usable' means a line carrying at least min_intensity of that shell's
+    emission - an element whose only in-range line is a 1% satellite cannot
+    be identified from it and would only add a free parameter.
+    """
+    out = []
+    for Z in range(3, 93):
+        try:
+            lines = db.line_list(Z, shell)
+        except Exception:
+            continue
+        if any(e_low <= e <= e_high and i >= min_intensity for e, i in lines):
+            out.append((Z, db.sym[Z]))
+    return out
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -53,6 +77,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1500, 950)
         self._build()
         self._refresh_db_label()
+        self.rebuild_element_lists()
 
     # ------------------------------------------------------------ layout
 
@@ -76,6 +101,8 @@ class MainWindow(QtWidgets.QMainWindow):
         f.addSeparator()
         f.addAction('&Export analysis...', self.on_export, 'Ctrl+E')
         f.addAction('Export &DA matrix (.dam)...', self.on_export_dam)
+        f.addAction('Save spectrum &image...', self.on_save_image,
+                    'Ctrl+P')
         f.addSeparator()
         f.addAction('&Quit', self.close, 'Ctrl+Q')
         a = m.addMenu('&Analysis')
@@ -129,26 +156,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # -- elements
         g = QtWidgets.QGroupBox('Elements')
         gl = QtWidgets.QVBoxLayout(g)
+        self.ed_filter = QtWidgets.QLineEdit()
+        self.ed_filter.setPlaceholderText(
+            'filter by symbol, e.g. "Fe" or "Fe Ni Zn"')
+        self.ed_filter.textChanged.connect(self.on_filter)
+        gl.addWidget(self.ed_filter)
         self.tabs_el = QtWidgets.QTabWidget()
         self.el_lists = {}
-        for shell, names in ((1, DEFAULT_K), (2, DEFAULT_L), (3, DEFAULT_M)):
+        for shell in (1, 2, 3):
             lw = QtWidgets.QListWidget()
             lw.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
-            for n in names:
-                QtWidgets.QListWidgetItem(n, lw)
-            lw.setMaximumHeight(150)
+            lw.setMaximumHeight(170)
             self.el_lists[shell] = lw
-            self.tabs_el.addTab(lw, {1: 'K', 2: 'L', 3: 'M'}[shell])
+            self.tabs_el.addTab(lw, SHELL_NAMES[shell])
         gl.addWidget(self.tabs_el)
         row = QtWidgets.QHBoxLayout()
         b1 = QtWidgets.QPushButton('Light preset')
-        b1.clicked.connect(lambda: self.preset(
-            ['C', 'N', 'O', 'F', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl',
-             'K', 'Ca'], [], []))
+        b1.clicked.connect(lambda: self.preset(PRESET_LIGHT, [], []))
         b2 = QtWidgets.QPushButton('Silicate preset')
-        b2.clicked.connect(lambda: self.preset(
-            ['C', 'N', 'O', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'K',
-             'Ca', 'Ti', 'Cr', 'Mn', 'Fe'], ['Fe', 'Ni'], []))
+        b2.clicked.connect(lambda: self.preset(PRESET_SILICATE,
+                                               ['Fe', 'Ni'], []))
         b3 = QtWidgets.QPushButton('Clear')
         b3.clicked.connect(lambda: self.preset([], [], []))
         for b in (b1, b2, b3):
@@ -265,7 +292,14 @@ class MainWindow(QtWidgets.QMainWindow):
                                'X-ray lines near that energy.')
         b_pk = QtWidgets.QPushButton('Find peaks')
         b_pk.clicked.connect(self.on_identify)
-        for x in (cb_log, cb_cmp, cb_lab, b_full, self.chk_id, b_pk):
+        b_lab = QtWidgets.QPushButton('Label all peaks')
+        b_lab.setToolTip('Annotate every detected peak with its best '
+                         'identification, ready for export.')
+        b_lab.clicked.connect(self.on_label_peaks)
+        b_nomark = QtWidgets.QPushButton('Clear markers')
+        b_nomark.clicked.connect(lambda: self.spec.clear_markers())
+        for x in (cb_log, cb_cmp, cb_lab, b_full, self.chk_id, b_pk,
+                  b_lab, b_nomark):
             bar.addWidget(x)
         bar.addStretch(1)
         sv.addWidget(toolbar_for(self.spec, sw))
@@ -280,8 +314,8 @@ class MainWindow(QtWidgets.QMainWindow):
         mv = QtWidgets.QVBoxLayout(mw)
         top = QtWidgets.QHBoxLayout()
         self.cmb_mapel = QtWidgets.QComboBox()
-        self.cmb_mapel.addItems(DEFAULT_K)
         self.cmb_mapel.setEditable(True)
+        self.cmb_mapel.setToolTip('An element symbol, or a bare energy in keV')
         b_map = QtWidgets.QPushButton('Show map')
         b_map.clicked.connect(self.on_map)
         self.spin_bin = QtWidgets.QSpinBox()
@@ -397,6 +431,8 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError:
             pass
         o.mac = self.cmb_mac.currentText()
+        if (o.e_low, o.e_high) != getattr(self, '_range_shown', None):
+            self.rebuild_element_lists()
         o.use_escape_step = self.chk_escape.isChecked()
         o.use_contact_step = self.chk_contact.isChecked()
         o.use_window_step = self.chk_window.isChecked()
@@ -473,9 +509,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if s.spectrum is None:
             return
         title = s.label + (' [%s]' % s.mask_name if s.mask_name else '')
+        o = s.options
         self.spec.show(s.energy, s.spectrum, fit=s.fit,
                        background=s._bk, labels=self.line_labels(),
-                       title=title)
+                       title=title, xlim=(o.e_low, o.e_high))
 
     def on_fit(self):
         s = self.session
@@ -633,6 +670,117 @@ class MainWindow(QtWidgets.QMainWindow):
                  % (len(w), d, '\n   '.join(w)))
         self.tabs.setCurrentIndex(3)
 
+    # -- markers and image export -----------------------------------------
+
+    def on_label_peaks(self):
+        """Annotate every detected peak with its best identification.
+
+        Intended for producing a figure. Each marker sits where the assigned
+        line falls under the current calibration, so a mislabelled or
+        miscalibrated peak is visible as a guide that misses.
+        """
+        s = self.session
+        if s.spectrum is None:
+            self.say('Nothing loaded.')
+            return
+        o = s.options
+        pk = lineid.find_peaks(s.spectrum, s.cal, background=s._bk,
+                               e_low=o.e_low, e_high=o.e_high, min_sigma=6.0)
+        if not pk:
+            self.say('No peaks above 6 sigma.')
+            return
+        # prefer an identification among the elements actually being fitted -
+        # if the fit says it is iron, do not label it something else
+        fitted = set()
+        for Z, sh in self.selected_elements():
+            fitted.add((s.db.sym[Z], sh))
+        marks, unknown = [], 0
+        for e, net, sg in pk:
+            cands = lineid.identify(s.db, e, window_eV=70.0, limit=6)
+            if not cands:
+                unknown += 1
+                continue
+            pick = next((c for c in cands if (c.symbol, c.shell) in fitted),
+                        cands[0])
+            col = '#0F766E' if (pick.symbol, pick.shell) in fitted else '#A8323F'
+            marks.append((pick.label(), pick.energy, col))
+        self.spec.set_markers(marks)
+        self.say('Labelled %d peaks (%d unidentified). Teal = an element in '
+                 'the current fit, red = suggested by the line table only.'
+                 % (len(marks), unknown))
+
+    def on_save_image(self):
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, 'Save the spectrum view', '',
+            'PNG (*.png);;PDF (*.pdf);;SVG (*.svg)')
+        if not path:
+            return
+        s = self.session
+        title = s.label + (' [%s]' % s.mask_name if s.mask_name else '')
+        if s.fit is not None:
+            title += '   chi2r = %.2f' % s.fit.reduced_chi2
+        try:
+            self.spec.save_image(path, dpi=200, title=title)
+        except Exception as ex:
+            self.say('SAVE IMAGE FAILED: %s' % ex)
+            return
+        self.say('Wrote %s at 200 dpi - exactly the view on screen, markers '
+                 'and zoom included.' % os.path.basename(path))
+
+    # -- element lists ----------------------------------------------------
+
+    def rebuild_element_lists(self):
+        """Repopulate K/L/M from the current energy window, preserving what
+        was already selected.
+
+        Called at startup and whenever the fit range changes. Widening the
+        range to 12 keV brings the transition metal K lines into the K tab;
+        narrowing it to 3 keV drops them. The list always reflects what is
+        actually detectable, which is the only honest thing for it to show.
+        """
+        o = self.session.options
+        try:
+            db = self.session.db
+        except Exception as ex:
+            self.say('Cannot build element lists: %s' % ex)
+            return
+        keep = {sh: {self.session.db.sym[Z] for Z, s2 in self.selected_elements()
+                     if s2 == sh}
+                for sh in (1, 2, 3)} if self.el_lists[1].count() else {}
+        for sh, lw in self.el_lists.items():
+            lw.blockSignals(True)
+            lw.clear()
+            for Z, sym in elements_in_range(db, sh, o.e_low, o.e_high):
+                it = QtWidgets.QListWidgetItem(sym, lw)
+                e = db.line_energy(Z, sh)
+                it.setToolTip('%s %s-shell, main line %.4f keV'
+                              % (sym, SHELL_NAMES[sh], e))
+                if sym in keep.get(sh, ()):
+                    it.setSelected(True)
+            lw.blockSignals(False)
+            self.tabs_el.setTabText(sh - 1, '%s (%d)'
+                                    % (SHELL_NAMES[sh], lw.count()))
+        self._range_shown = (o.e_low, o.e_high)
+        syms = [self.el_lists[1].item(i).text()
+                for i in range(self.el_lists[1].count())]
+        self.cmb_mapel.clear()
+        self.cmb_mapel.addItems(syms)
+        self.say('Element lists rebuilt for %.2f-%.2f keV: %d K, %d L, %d M '
+                 'available.' % (o.e_low, o.e_high, self.el_lists[1].count(),
+                                 self.el_lists[2].count(),
+                                 self.el_lists[3].count()))
+
+    def on_filter(self, text):
+        """Hide entries that do not match, without disturbing selection."""
+        want = [t.strip().lower() for t in text.replace(',', ' ').split()
+                if t.strip()]
+        for lw in self.el_lists.values():
+            for i in range(lw.count()):
+                it = lw.item(i)
+                hide = bool(want) and not any(
+                    it.text().lower().startswith(w) for w in want)
+                it.setHidden(hide)
+
     # -- line identification ---------------------------------------------
 
     def on_spec_click(self, event):
@@ -660,6 +808,12 @@ class MainWindow(QtWidgets.QMainWindow):
             lines.append('   %-9s %8.4f keV  %+5.0f eV   rel.int %.3f%s'
                          % (c.label(), c.energy, c.delta_eV, c.intensity, mark))
         self.say(chr(10).join(lines))
+        # draw where each candidate WOULD fall under the current calibration.
+        # A guide that misses the peak means either the identification or the
+        # calibration is wrong, and seeing that is the whole point.
+        cols = ['#A8323F', '#0F766E', '#B8860B', '#2B6CB0', '#7C3AED']
+        self.spec.set_markers([(c.label(), c.energy, cols[i % len(cols)])
+                               for i, c in enumerate(cands[:5])])
         self.status.showMessage('%.4f keV: %s' % (e, ', '.join(
             c.label() for c in cands[:4])), 15000)
 
@@ -754,9 +908,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 if it.text() in names and not it.isSelected():
                     it.setSelected(True)
                     added += 1
-        self.say('Selected %d suggested elements. Elements not in the default '
-                 'list are not added automatically - check the log for those.'
-                 % added)
+        missing = []
+        for sh, names in want.items():
+            have = {self.el_lists[sh].item(i).text()
+                    for i in range(self.el_lists[sh].count())}
+            missing += ['%s%s' % (n, SHELL_NAMES[sh])
+                        for n in names if n not in have]
+        msg = 'Selected %d suggested elements.' % added
+        if missing:
+            msg += (' Not offered in the current %.2f-%.2f keV window: %s. '
+                    'Widen the range if you want them.'
+                    % (self.session.options.e_low, self.session.options.e_high,
+                       ', '.join(missing)))
+        self.say(msg)
 
     # -- efficiency and quantification ----------------------------------
 

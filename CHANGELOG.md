@@ -98,3 +98,26 @@ element has a line nearby. On a chondrite that produced 13,425 counts of
   Coincidences still appear lower down; it is a shortlist, not a verdict.
 - GUI: identify-on-click, Find peaks, Suggest from spectrum with highlighting
   in the element lists, Accept suggested.
+
+## 0.4.0 - every element reachable, peaks marked and labelled
+
+- **Element lists are now built from the energy range**, not hard-coded. At
+  0.2-6.5 keV that is 21 K, 51 L and 45 M entries; widen the range and the
+  transition-metal K lines appear. A fixed menu is worse than useless on an
+  unknown sample - it silently rules out whatever the author did not think of.
+  A filter box narrows the list by symbol.
+- **Identification markers.** Clicking the spectrum now draws a dashed guide
+  where each candidate line WOULD fall under the current calibration. If the
+  guide misses the peak, either the identification or the calibration is
+  wrong, and both are worth knowing before fitting.
+- **Label all peaks** annotates every detected peak with its best
+  identification, preferring elements already in the fit. Teal means the
+  element is being fitted, red means the line table suggested it and nothing
+  else supports it.
+- **Save spectrum image** (Ctrl+P) writes exactly the view on screen at
+  200 dpi - markers, zoom and all.
+- Labels are placed into whichever of five rows is free at that energy and
+  dropped rather than overprinted, so a crowded low-energy region stays
+  readable. The x-axis is now clamped to the fit range; previously a guide
+  for a line at 30 keV would stretch the axis and squeeze the data into a
+  sliver.
