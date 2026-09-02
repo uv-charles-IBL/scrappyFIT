@@ -158,6 +158,36 @@ def concentrations(rec, min_conc=0.0):
     return sorted(rows, key=lambda t: -t[2])
 
 
+def area_scale(rec, i, db):
+    """Factor converting an ELEMENT-TOTAL area into what .pfr row i stores.
+
+    A .pfr does not store the element total. Its 'line' field names the
+    transition the area belongs to - 'Ka_' for the unresolved Ka group below
+    Z = 28, 'Ka1' above it where Ka1 and Ka2 separate - and the area is that
+    line's, so it carries the branching fraction.
+
+    Getting this wrong looks like a physics disagreement rather than a
+    bookkeeping one. Against donut2x the raw element totals here came out
+    1.77x GeoPIXE's areas across nineteen elements, which reads as a
+    systematic error; multiplying by the branch gives a median of 0.955.
+
+    Note this is the OPPOSITE convention to a .yield file, which does store
+    element totals. Two GeoPIXE formats, two conventions.
+    """
+    name = (rec['name'][i] or '').split()[0]
+    Z = db.z.get(name.lower())
+    if not Z:
+        return None
+    shell = int(rec['shell'][i]) or 1
+    lines = db.line_list(Z, shell)
+    if not lines:
+        return None
+    tag = (rec['line'][i] or '').strip().lower()
+    if tag.startswith('ka') or tag.startswith('la') or tag.startswith('ma'):
+        return max(i2 for _, i2 in lines)
+    return 1.0
+
+
 def summary(rec):
     """One-line description of what GeoPIXE was fitting."""
     sp = rec.get('spectrum', {})

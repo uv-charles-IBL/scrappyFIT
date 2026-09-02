@@ -25,7 +25,10 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from scrappyfit.io.gpfit import read_fit_results               # noqa: E402
+from scrappyfit.io.gpfit import (area_scale,                   # noqa: E402
+                                 read_fit_results)
+from scrappyfit.io.gpdetector import (read_detector,           # noqa: E402
+                                      read_filter)
 from scrappyfit.io.gpspec import (calibration_from_pfr,        # noqa: E402
                                   read_spec, verify)
 from scrappyfit.session import Session                          # noqa: E402
@@ -33,6 +36,51 @@ from scrappyfit.session import Session                          # noqa: E402
 BASE = r'C:\Users\Charles\Desktop\GeoPIXE-main\test_data\fits\CSIRO'
 SPEC = os.path.join(BASE, 'donut2x-2-whole.spec')
 PFR = os.path.join(BASE, 'donut2x-2-whole-REF.pfr')
+
+
+GEO_INSTALL = r"C:\Users\Charles\Desktop\GeoPIXE Install\GeoPIXE"
+
+
+def _named_files(pfr_path, suffix):
+    """Filenames with the given suffix mentioned anywhere in a .pfr.
+
+    gpfit.py stops decoding before the detector and filter structs, so
+    rec['detector'] is not populated. The names are still in the file as
+    plain strings, and scanning for them is reliable in a way that guessing
+    struct offsets is not. Missing this silently is expensive: without it
+    the donut2x comparison runs with a SILICON crystal against a spectrum
+    taken on germanium.
+    """
+    import re
+    raw = open(pfr_path, 'rb').read()
+    pat = re.compile((r'[ -~]{3,}' + re.escape(suffix)).encode(), re.I)
+    return [m.group().decode('latin-1') for m in pat.finditer(raw)]
+
+
+def _locate(name):
+    for d in (os.path.join(GEO_INSTALL, 'Extra Detector Files'), GEO_INSTALL):
+        p = os.path.join(d, os.path.basename(name))
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _find_detector(pfr_path):
+    """The .detector the .pfr names, if it is on this machine."""
+    for nm in _named_files(pfr_path, '.detector'):
+        p = _locate(nm)
+        if p:
+            return read_detector(p)
+    return None
+
+
+def _find_filters(pfr_path):
+    out = []
+    for nm in _named_files(pfr_path, '.filter'):
+        p = _locate(nm)
+        if p:
+            out += read_filter(p)
+    return out
 
 
 def main(spec_path=SPEC, pfr_path=PFR):
@@ -59,6 +107,36 @@ def main(spec_path=SPEC, pfr_path=PFR):
 
     s = Session()
     s.load_spectrum(spec, cal=cal, label=os.path.basename(spec_path))
+
+    # Use the detector GeoPIXE actually used. The .pfr names it, and it
+    # matters: Canberra-34 is a GERMANIUM crystal behind 200 um of aluminium,
+    # so escape peaks are Ge (9.886 keV) rather than Si, and nothing below
+    # about 5 keV reaches the crystal at all.
+    det = _find_detector(pfr_path)
+    if det:
+        s.options.crystal_Z = det['crystal']['Z'][0]
+        s.options.crystal_thick_um = det['crystal']['thick'] / 5.32 * 10.0
+        s.options.mac = 'mixed'           # Henke stops at 30 keV
+        s._escape = None
+        flt = _find_filters(pfr_path)
+        print('  detector %s: crystal Z=%d, %.4g mg/cm2, %d absorber(s)'
+              % (os.path.basename(det['path']), det['crystal']['Z'][0],
+                 det['crystal']['thick'], len(det['absorbers'] or [])))
+        if flt:
+            print('  external filter(s): %s'
+                  % ', '.join('%.4g mg/cm2 Z=%s'
+                              % (f['thick'], f['Z'][0]) for f in flt))
+    else:
+        print('  WARNING: the detector named in the .pfr was not found, so '
+              'this runs on the default silicon crystal')
+
+    # GeoPIXE's fitted width parameters are already in OUR units:
+    # FWHM in channels = sqrt(noise^2 + fano^2 (E - e_low)).
+    par = rec.get('parameters') or {}
+    if 'noise' in par and 'fano' in par:
+        s.options.noise, s.options.fano = par['noise'], par['fano']
+        print('  width from the .pfr: noise %.4f, Fano %.4f'
+              % (par['noise'], par['fano']))
     rows, worst = verify(spec, cal, s.db)
     print('  calibration check against known lines, worst %.0f eV:' % worst)
     for ch, e, c, lab, d in rows[:6]:
@@ -102,18 +180,30 @@ def main(spec_path=SPEC, pfr_path=PFR):
         nm = (rec['name'][i] or '').split()[0]
         gp_area[nm] = float(rec['area'][i])
 
+    scale = {}
+    for i in range(rec['n_els']):
+        if rec['mask'][i] == 0:
+            continue
+        nm = (rec['name'][i] or '').split()[0]
+        sc = area_scale(rec, i, s.db)
+        if sc:
+            scale[nm] = sc
+
     print()
-    print('FITTED PEAK AREAS - the like-for-like comparison')
+    print('FITTED PEAK AREAS, both on GeoPIXE per-line convention')
     print('%-6s %14s %14s %9s' % ('el', 'GeoPIXE', 'scrappyFIT', 'ratio'))
     print('-' * 48)
     rat = []
     for nm in sorted(gp_area, key=lambda k: -gp_area[k]):
         g = gp_area[nm]
         m = mine_area.get(nm)
-        if m is None or g <= 0:
+        if m is None or g <= 0 or m <= 0:
             continue
-        rat.append(m / g)
-        print('%-6s %14.4g %14.4g %9.3f' % (nm, g, m, m / g))
+        # A .pfr area is the named LINE, not the element total - see
+        # gpfit.area_scale. Bring ours onto the same convention.
+        br = scale.get(nm, 1.0)
+        rat.append(m * br / g)
+        print('%-6s %14.4g %14.4g %9.3f' % (nm, g, m * br, m * br / g))
     if rat:
         rat = np.array(rat)
         print('-' * 48)
