@@ -208,6 +208,28 @@ class Session:
 
     # -- loading --------------------------------------------------------
 
+    def load_spectrum(self, counts, cal=None, label=''):
+        """Take a spectrum straight from an array.
+
+        For data that arrived through a reader of its own rather than through
+        load() - a GeoPIXE binary .spec, a detector API, a simulation. No
+        event positions, so maps and masking stay unavailable.
+        """
+        a = np.asarray(counts, dtype=float).ravel()
+        if a.size == 0:
+            raise ValueError('empty spectrum')
+        self.path = None
+        self.events = None
+        self.dam = None
+        self.spectrum = a
+        self.full_spectrum = a.copy()
+        self.mask = None
+        if cal:
+            self.cal = (float(cal[0]), float(cal[1]))
+        self.label = label or 'spectrum'
+        self.invalidate()
+        return self
+
     def load(self, path, adc=0):
         """Open any format we understand.
 

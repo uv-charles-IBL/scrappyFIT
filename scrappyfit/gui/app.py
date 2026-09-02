@@ -38,6 +38,7 @@ from ..session import FitOptions, Session
 from .canvases import MapCanvas, SpectrumCanvas, toolbar_for
 from .dialogs import ElementDialog, SampleModelDialog
 from .layerview import LayerStackDialog
+from .profileview import ProfileDialog
 
 # The element lists are not a fixed menu. They are rebuilt from the working
 # energy range, so every element with a line you could actually detect is
@@ -118,6 +119,8 @@ class MainWindow(QtWidgets.QMainWindow):
         a.addAction('Sample &model...', self.on_sample_model)
         a.addAction('&Layer stack and escape...', self.on_layers,
                     'Ctrl+L')
+        a.addAction('Concentration &profiles...', self.on_profiles,
+                    'Ctrl+Shift+P')
         a.addAction('&Batch...', self.on_batch, 'Ctrl+B')
         a.addSeparator()
         a.addAction('&Identify peaks', self.on_identify, 'Ctrl+I')
@@ -925,6 +928,58 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_elements_changed(self):
         self.lbl_els.setText('selected: ' + self.elements.table.summary())
+
+    def on_profiles(self):
+        """Traverses and regions on the element maps.
+
+        Needs maps, and there are two ways to have them. A loaded DA matrix
+        gives proper deconvolved concentrations and is what should be used
+        when one exists; without it, simple window maps are offered instead,
+        with a warning, because a window map counts everything under the
+        window and an overlapped element will read high.
+        """
+        s = self.session
+        if s.events is None:
+            self.say('Profiles need a list-mode file - the maps come from '
+                     'event positions. Open the .lmf.')
+            return
+        if not hasattr(self, 'profileview'):
+            self.profileview = ProfileDialog(s, self)
+        try:
+            if s.dam is not None:
+                maps = s.da_maps(binning=self.spin_bin.value()
+                                 if hasattr(self, 'spin_bin') else 2)
+                note = 'DA matrix: %d elements, overlaps deconvolved.' % len(maps)
+            else:
+                els = self.selected_elements()
+                if not els:
+                    self.say('Select some elements, or load a DA matrix.')
+                    return
+                maps = {}
+                for Z, sh in els:
+                    nm = s.db.sym[Z] + {1: '', 2: 'L', 3: 'M'}[sh]
+                    e = s.db.line_energy(Z, sh)
+                    if not (s.options.e_low < e < s.options.e_high):
+                        continue
+                    try:
+                        maps[nm] = s.element_map(e, binning=2)
+                    except Exception:
+                        continue
+                note = ('WINDOW maps, no DA matrix loaded. A window counts '
+                        'everything under it, so an overlapped element reads '
+                        'high. Load a .dam for real concentrations.')
+        except Exception as ex:
+            self.say('could not build maps: %s' % ex)
+            return
+        if not maps:
+            self.say('no maps could be built')
+            return
+        self.profileview.set_maps(maps)
+        self.profileview.out.setPlainText(
+            note + chr(10) + 'Drag on the map to place a traverse.')
+        self.profileview.show()
+        self.profileview.raise_()
+        self.profileview.activateWindow()
 
     def on_layers(self):
         if not hasattr(self, 'layerview'):
