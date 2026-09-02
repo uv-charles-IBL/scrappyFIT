@@ -135,12 +135,25 @@ class YieldModel:
                 prevx, prevf = x, f
             y = tot * om * db.N_A_over_A(Z)
 
-            # GeoPIXE reports the yield PER MAJOR LINE, not per element. Below
-            # Z = 27 the major line is the unresolved Ka group (beta ~ 0.88);
-            # above it, the group splits and the major line becomes Ka1 alone
-            # (beta ~ 0.58). Comparing an element-total yield against GeoPIXE's
-            # therefore shows a spurious 1.5x step at Z = 28. Same convention
-            # applies to the 'area' field in .pfr fit-result files.
+            # CORRECTION, measured against GeoPIXE's own -REF.yield files:
+            # a .yield file stores the ELEMENT TOTAL, not the major line. The
+            # earlier note here claimed the opposite and it was wrong.
+            #
+            # The evidence is a trend, not an offset, which is what makes it
+            # convincing. The strongest single K line is about 0.88 of the K
+            # total below Z = 28 and about 0.58 above it, where Ka1 and Ka2
+            # separate in the line table. Applying that factor puts a slope of
+            # -19% per 10 Z into the comparison against GeoPIXE; removing it
+            # leaves +1.7% per 10 Z. GeoPIXE's own n_lines field does change
+            # at Z = 28, so it groups lines differently there too - but its
+            # stored yield does not step, which it would if the yield were
+            # per-line.
+            #
+            # per_major_line is kept because quantify() uses it: it multiplies
+            # the fitted area by the same branch, so the factor cancels and
+            # concentrations are unaffected by this choice. Anything comparing
+            # or writing GeoPIXE yields must pass per_major_line=False.
+            # tools/bench_geopixe_yields.py is the check.
             if per_major_line:
                 lines = db.line_list(Z, 1)
                 if lines:

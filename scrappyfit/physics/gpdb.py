@@ -270,11 +270,37 @@ class Database:
 
     # -- mass attenuation coefficients --------------------------------------
 
+    #: Every accepted spelling of a tabulated MAC database.
+    #: Aliases matter here: the file is called MAC_SabbatucciSalvat2016.txt,
+    #: nobody types that, and the bare KeyError it used to raise looked like
+    #: a missing file rather than a misspelt name.
+    MAC_FILES = {
+        'henke1993': 'MAC_Henke1993.txt',
+        'henke': 'MAC_Henke1993.txt',
+        'sabbatuccisalvat2016': 'MAC_SabbatucciSalvat2016.txt',
+        'sabbatuccisalvat': 'MAC_SabbatucciSalvat2016.txt',
+        'sabbatucci': 'MAC_SabbatucciSalvat2016.txt',
+        'salvat': 'MAC_SabbatucciSalvat2016.txt',
+        'ffast': 'MAC_FFAST.txt',
+        'chantler': 'MAC_FFAST.txt',
+    }
+
+    #: Names handled inside mu() rather than by loading a table.
+    MAC_COMPUTED = ('xcom', 'hubbell', 'berger-hubbell', 'mixed')
+
+    @classmethod
+    def mac_datasets(cls):
+        """Every dataset name mu() will accept, sorted."""
+        return sorted(set(cls.MAC_FILES) | set(cls.MAC_COMPUTED))
+
     def load_mac(self, name):
         """Load one of the tabulated MAC databases written for GeoPIXE."""
-        fn = {'henke1993': 'MAC_Henke1993.txt',
-              'sabbatuccisalvat2016': 'MAC_SabbatucciSalvat2016.txt',
-              'ffast': 'MAC_FFAST.txt'}[name.lower()]
+        key = name.lower()
+        if key not in self.MAC_FILES:
+            raise KeyError(
+                'unknown MAC dataset %r. Valid names are: %s'
+                % (name, ', '.join(self.mac_datasets())))
+        fn = self.MAC_FILES[key]
         tab = {}
         cur = None
         mode = 0
@@ -292,7 +318,7 @@ class Database:
             elif mode == 1 and len(w) == 2:
                 tab[cur][0].append(float(w[0]))
                 tab[cur][1].append(float(w[1]))
-        self._mac[name.lower()] = tab
+        self._mac[key] = tab
         return tab
 
     # Below this energy no XCOM-class tabulation supplies anything, so the
