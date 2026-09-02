@@ -246,16 +246,48 @@ class Session:
         self.charge = float(q.sum())
         self.label = _sample_name(_lmf.ascii_header(str(p))) or p.name
 
-    def _load_dam(self, p):
+    def load_dam(self, path, keep_data=None):
+        """Attach a GeoPIXE Dynamic Analysis matrix.
+
+        A DA matrix is built once from a good fit and then applied to other
+        runs from the same session - that is the whole point of it, and it is
+        why this is separate from load(). Two situations:
+
+          keep_data=True   attach the matrix to whatever is already loaded.
+                           Use this to apply one run's matrix to another
+                           run's events, which is the normal case.
+          keep_data=False  also load the list-mode file the matrix was built
+                           from, if it can be found beside it.
+
+        The default follows what is already open: if events are loaded, the
+        matrix is attached to them and the calibration is left alone, because
+        overwriting a working calibration with one from another file is a
+        silent way to get wrong energies.
+        """
+        p = pathlib.Path(path)
+        if keep_data is None:
+            keep_data = self.events is not None
         self.dam = _gpda.read_dam(str(p))[0]
-        self.cal = self.dam['cal']
-        self.charge = self.dam['charge']
-        self.label = os.path.basename(self.dam['label']) or p.name
-        src = pathlib.Path(self.dam['label'])
-        for cand in (src, p.with_suffix('.lmf'), p.parent / src.name):
-            if cand.suffix.lower() == '.lmf' and cand.exists():
-                self._load_lmf(cand, 0)
-                break
+        if not keep_data:
+            self.cal = self.dam['cal']
+            self.charge = self.dam['charge']
+            self.label = os.path.basename(self.dam['label']) or p.name
+            src = pathlib.Path(self.dam['label'])
+            for cand in (src, p.with_suffix('.lmf'), p.parent / src.name):
+                if cand.suffix.lower() == '.lmf' and cand.exists():
+                    self._load_lmf(cand, 0)
+                    break
+        self.invalidate()
+        return self
+
+    def dam_elements(self):
+        """Element names the loaded matrix can project, in its own order."""
+        if self.dam is None:
+            return []
+        return list(self.dam.get('el') or self.dam.get('names') or [])
+
+    def _load_dam(self, p):
+        self.load_dam(p, keep_data=False)
 
     def _load_spec_text(self, p):
         cal, data = None, []

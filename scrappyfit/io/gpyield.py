@@ -25,6 +25,26 @@ class _R:
             v = float(np.frombuffer(self.b, '>f4', 1, self.p)[0]); self.p += 4; return v
         v = np.frombuffer(self.b, '>f4', n, self.p).astype(float); self.p += 4 * n; return v
 
+    def raw(self, n):
+        """n bytes verbatim, advanced to the next 4-byte boundary."""
+        v = self.b[self.p:self.p + n]
+        self.p += (n + 3) // 4 * 4
+        return v
+
+    def byt(self, n=None):
+        """IDL BYTE. XDR pads out to a 4-byte slot.
+
+        Named byt() rather than b() because self.b is the buffer - a method
+        called b would be shadowed by it and never callable.
+        """
+        if n is None:
+            v = int(self.b[self.p])
+            self.p += 4
+            return v
+        v = np.frombuffer(self.b, 'u1', n, self.p).astype(int)
+        self.p += (n + 3) // 4 * 4
+        return v
+
     def s(self):
         n = self.i4()
         if n == 0:
