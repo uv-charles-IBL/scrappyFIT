@@ -119,6 +119,7 @@ class MainWindow(QtWidgets.QMainWindow):
         a.addAction('Sample &model...', self.on_sample_model)
         a.addAction('&Layer stack and escape...', self.on_layers,
                     'Ctrl+L')
+        a.addAction('Load &DA matrix (.dam)...', self.on_load_dam)
         a.addAction('Concentration &profiles...', self.on_profiles,
                     'Ctrl+Shift+P')
         a.addAction('&Batch...', self.on_batch, 'Ctrl+B')
@@ -928,6 +929,36 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_elements_changed(self):
         self.lbl_els.setText('selected: ' + self.elements.table.summary())
+
+    def on_load_dam(self):
+        """Attach a DA matrix to the data already open.
+
+        Separate from File > Open, which would treat the .dam as the thing
+        being opened and pull in ITS list-mode file, replacing whatever is
+        loaded. A matrix is built once from a good fit and then applied to
+        other runs from the same session, so attaching it to the current data
+        is the normal case and deserves its own entry.
+        """
+        s = self.session
+        if s.events is None:
+            self.say('Open the list-mode file first - a DA matrix is applied '
+                     'to events.')
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Open a GeoPIXE DA matrix', '', 'DA matrix (*.dam);;All (*)')
+        if not path:
+            return
+        try:
+            s.load_dam(path, keep_data=True)
+        except Exception as ex:
+            self.say('DA LOAD FAILED: %s' % ex)
+            return
+        els = s.dam_elements()
+        self.say('DA matrix loaded: %d elements (%s).%s  Calibration left as '
+                 'it was. Analysis > Concentration profiles now gives real '
+                 'deconvolved concentrations.'
+                 % (len(els), ', '.join(str(e) for e in els[:14]),
+                    ' ...' if len(els) > 14 else ''))
 
     def on_profiles(self):
         """Traverses and regions on the element maps.
