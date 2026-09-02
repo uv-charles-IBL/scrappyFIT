@@ -96,6 +96,56 @@ def read_detector(path):
     out = dict(version=int(i4[0]), path=path, names=names,
                absorbers=[l for _, l in layers[:-1]],
                crystal=layers[-1][1] if layers else None)
+    if layers:
+        out.update(_scalars_after(raw, i4, v4, layers[-1][0]))
+    return out
+
+
+def _scalars_after(raw, i4, v4, k_crystal):
+    """The scalar block that follows the crystal layer.
+
+    read_detector.pro reads, in order:
+
+        crystal (a layer)
+        diameter, density, distance, source
+        gamma_factor, w0, w1, resolution
+        aeff, beff
+        tail {F, B, amp, L, S}
+
+    The layer ends with its thickness at k+65, then an XDR string for the
+    name, then these fifteen floats. Skipping the string by its own length
+    is exact, so no scanning is needed here.
+
+    On Canberra-34 this yields density 5.338, gamma_factor 0.24 (germanium,
+    against silicon's 0.022), w1 0.002089 - which matches the w1 in the .pfr
+    written from it - and tail {F 12 um, B 9850 um, amp 0.035, L 0.6978,
+    S 0.064}, matching the .pfr's tail exactly.
+    """
+    p = (k_crystal + LAYER_WORDS) * 4          # just past 'thick'
+    n = int(np.frombuffer(raw[p:p + 4], '>i4')[0]) if p + 4 <= len(raw) else 0
+    if 0 < n < 256:
+        p += 4
+        if (p + 4 <= len(raw)
+                and int(np.frombuffer(raw[p:p + 4], '>i4')[0]) == n):
+            p += 4                              # doubled-length form
+        p += (n + 3) // 4 * 4                   # the padded bytes
+    else:
+        p += 4                                  # empty string
+
+    need = 15
+    k = p // 4
+    if k + need > len(v4):
+        return {}
+    f = [float(x) for x in v4[k:k + need]]
+    out = dict(diameter=f[0], density=f[1], distance=f[2], source=f[3],
+               gamma_factor=f[4], w0=f[5], w1=f[6], resolution=f[7],
+               aeff=f[8], beff=f[9],
+               tail=dict(F=f[10], B=f[11], amp=f[12], L=f[13], S=f[14]))
+    # Sanity: a detector density and a tail amplitude have known ranges. If
+    # they are wrong the string skip was wrong, and silently returning
+    # nonsense here would poison every lineshape.
+    if not (0.1 < out['density'] < 25.0 and 0.0 <= out['tail']['amp'] < 1.0):
+        return {}
     return out
 
 
@@ -177,4 +227,11 @@ def describe(det):
     if c:
         rows.append('   crystal  Z=%-12s thick %10.6g mg/cm2'
                     % (','.join(str(z) for z in c['Z']), c['thick']))
+    if det.get('tail'):
+        t = det['tail']
+        rows.append('   density %.4g g/cm3, gamma %.4g, resolution %.4g keV'
+                    % (det.get('density', 0), det.get('gamma_factor', 0),
+                       det.get('resolution', 0)))
+        rows.append('   tail F %.4g um, B %.4g um, amp %.4g, L %.4g, S %.4g'
+                    % (t['F'], t['B'], t['amp'], t['L'], t['S']))
     return '\n'.join(rows)

@@ -151,6 +151,8 @@ class Session:
         self._db = None
         self.efficiency = None
         self.geometry = Geometry()
+        self.detector = None        # a GeoPIXE .detector model, if loaded
+        self._tail_fns = None       # its energy-dependent tail functions
         self._escape = None
         self.reset_data()
 
@@ -272,7 +274,7 @@ class Session:
         elif ext == '.dam':
             self._load_dam(p)
         elif ext == '.spec':
-            self._load_spec_text(p)
+            self._load_spec_any(p)
         else:
             self._load_columns(p)
         self.full_spectrum = (None if self.spectrum is None
@@ -289,6 +291,60 @@ class Session:
         self.spectrum = np.bincount(e[m], minlength=4096).astype(float)
         self.charge = float(q.sum())
         self.label = _sample_name(_lmf.ascii_header(str(p))) or p.name
+
+    def load_detector(self, path):
+        """Load a GeoPIXE .detector file and adopt its physics.
+
+        This sets four things that a fit gets badly wrong without them:
+
+          * the crystal, so escape peaks are the right element. Canberra-34
+            is germanium: escape at 9.886 keV, not silicon's 1.740, and a
+            gamma_factor of 0.24 against silicon's 0.022.
+          * the energy-DEPENDENT tail amplitude and length. The flat values
+            used otherwise are the single largest lineshape error here.
+          * the resolution, if the file carries w0 and w1.
+          * the absorbers, for efficiency.
+        """
+        from .io import gpdetector as _gd
+        from .physics import dettail as _dt
+
+        det = _gd.read_detector(str(path))
+        if not det.get('crystal'):
+            raise ValueError('%s: no crystal layer found' % path)
+        self.detector = det
+        cry = det['crystal']
+        self.options.crystal_Z = cry['Z'][0]
+        dens = det.get('density') or 5.32
+        self.options.crystal_thick_um = cry['thick'] / dens * 10.0
+        if det.get('gamma_factor'):
+            self.options.escape_gamma = 1.0     # the file's own prefactor
+        if det.get('tail'):
+            self._tail_fns = _dt.tail_functions(det, self.db,
+                                                mac=self.options.mac)
+        w0, w1 = det.get('w0'), det.get('w1')
+        if w0 and w1 and self.cal and self.cal[0]:
+            # GeoPIXE: FWHM_keV^2 = w0 + w1 E.  Here: FWHM_ch^2 = noise^2 +
+            # fano^2 (E - e_low), and FWHM_keV = FWHM_ch x cal_a. Equating
+            # them gives fano and noise directly.
+            a = float(self.cal[0])
+            fano = (w1 ** 0.5) / a
+            noise2 = w0 / (a * a) + fano * fano * self.options.e_low
+            if noise2 > 0:
+                self.options.noise = noise2 ** 0.5
+                self.options.fano = fano
+        self._escape = None
+        self.invalidate()
+        return det
+
+    def load_filter(self, path):
+        """Add a GeoPIXE .filter to the absorbers in front of the crystal."""
+        from .io import gpdetector as _gd
+        if self.detector is None:
+            raise RuntimeError('load a .detector first')
+        self.detector.setdefault('external', [])
+        self.detector['external'] += _gd.read_filter(str(path))
+        self.invalidate()
+        return self.detector['external']
 
     def load_dam(self, path, keep_data=None):
         """Attach a GeoPIXE Dynamic Analysis matrix.
@@ -332,6 +388,42 @@ class Session:
 
     def _load_dam(self, p):
         self.load_dam(p, keep_data=False)
+
+    def _load_spec_any(self, p):
+        """A .spec is either GeoPIXE's text export or its binary XDR form.
+
+        The text one starts with printable SPEC/DATA records; the binary one
+        starts with a negative int32 version. Try text first and fall back,
+        so a user opening a .spec does not have to know which they have.
+
+        A binary .spec does not carry a usable energy calibration - it lives
+        in the .pfr written beside it - so that is picked up too when present,
+        and verified against known line energies rather than trusted.
+        """
+        try:
+            self._load_spec_text(p)
+            return
+        except Exception as text_error:
+            pass
+        from .io import gpspec as _gs
+        try:
+            spec, info = _gs.read_spec(str(p))
+        except Exception as ex:
+            raise ValueError(
+                '%s reads as neither a text .spec (%s) nor a binary one (%s)'
+                % (p.name, text_error, ex))
+        self.spectrum = np.asarray(spec, float)
+        self.full_spectrum = self.spectrum.copy()
+        self.events = None
+        self.label = p.stem
+        for cand in (p.with_name(p.stem + '-REF.pfr'),
+                     p.with_suffix('.pfr')):
+            if cand.exists():
+                cal = _gs.calibration_from_pfr(str(cand))
+                if cal:
+                    self.cal = cal
+                    self.label = '%s (cal from %s)' % (p.stem, cand.name)
+                break
 
     def _load_spec_text(self, p):
         cal, data = None, []
@@ -454,7 +546,14 @@ class Session:
             if sh == 2 and 21 <= Z <= 30:
                 c.tail_amp_fn = lambda E: 0.70
                 c.tail_len_fn = lambda E: 3.5
+            elif self._tail_fns is not None:
+                # Real detector model: amplitude and length both vary with
+                # energy, as tail_amplitude.pro and tail_length.pro do.
+                c.tail_amp_fn, c.tail_len_fn = self._tail_fns
             else:
+                # No detector model loaded, so a flat tail is all there is.
+                # It is a poor approximation over a wide energy range - see
+                # physics/dettail - but it is honest about being one.
                 c.tail_amp_fn = lambda E, a=self.options.tail_amp: a
                 c.tail_len_fn = lambda E, l=self.options.tail_len: l
             out.append(c)
