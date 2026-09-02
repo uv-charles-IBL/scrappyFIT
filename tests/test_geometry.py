@@ -1,6 +1,7 @@
 """Solid angle, the absolute normalisation, and the silicon escape prefactor."""
 
 import math
+import os
 
 import pytest
 
@@ -119,3 +120,60 @@ def test_scale_does_not_use_geopixes_own_constant():
     # from a GeoPIXE .yield file. The 2% between them is cross-section
     # interpolation, and is the honest size of the agreement.
     assert wrong / g.scale() == pytest.approx(60.22, rel=0.01)
+
+
+# --------------------------------------------- against GeoPIXE's own output
+
+GP_TEST = r'C:\Users\Charles\Desktop\GeoPIXE-main\test_data\yields'
+
+
+@pytest.mark.skipif(not os.path.isdir(GP_TEST),
+                    reason='GeoPIXE test_data not present')
+def test_yields_match_geopixe_reference_to_order_unity():
+    """The unit constant, checked against GeoPIXE's own reference output.
+
+    This is the regression guard for the 60x bug. It deliberately does NOT
+    demand agreement to a few percent - the remaining spread is real physics
+    (cross sections, attenuation dataset) and is tracked separately. What it
+    demands is that the ratio is of order one, which is exactly what a units
+    error destroys.
+    """
+    import numpy as np
+    from scrappyfit.io.gpyield import read_yield
+    from scrappyfit.physics.gpdb import Database
+    from scrappyfit.physics.geometry import YIELD_TO_GEOPIXE
+    from scrappyfit.physics.layers import Layer, LayeredYieldModel
+
+    f = os.path.join(GP_TEST, 'kimberlite-REF.yield')
+    Y = read_yield(f)
+    y0 = Y[0] if isinstance(Y, (list, tuple)) else Y
+    assert y0['z1'] == 1, 'expected a proton beam'
+
+    db = Database()
+    L = y0['layers'][0]
+    z2, sh = np.asarray(y0['z2']), np.asarray(y0['shell'])
+    row = np.asarray(y0['yield'])
+    row = row[0] if row.ndim == 2 else row
+    zk = [int(z) for z in z2[sh == 1]]
+
+    lym = LayeredYieldModel(db)
+    mine = lym.yields([Layer(list(L['Z']), list(L['F']), 1e4, 'matrix')],
+                      zk, E0=y0['e_beam'], theta_deg=y0.get('theta', 135.0),
+                      mac='henke1993', fy='krause', n_steps=900)
+
+    ratios = []
+    for i, (z, s_) in enumerate(zip(z2, sh)):
+        if s_ != 1:
+            continue
+        m = mine.get(int(z))
+        if m is None or not np.isfinite(m) or m <= 0:
+            continue
+        if i >= len(row) or row[i] <= 0:
+            continue
+        ratios.append(m * YIELD_TO_GEOPIXE / float(row[i]))
+
+    assert len(ratios) > 20
+    med = float(np.median(ratios))
+    assert 0.5 < med < 2.0, (
+        'median yield ratio %.4g against GeoPIXE - a units error, not physics'
+        % med)
