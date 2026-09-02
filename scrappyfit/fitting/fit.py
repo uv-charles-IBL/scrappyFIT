@@ -92,6 +92,46 @@ def expected_pileup_fraction(total_counts, live_seconds,
     return (float(total_counts) / float(live_seconds)) *         float(shaping_time_us) * 1e-6
 
 
+class BackgroundComponent:
+    """The continuum, with an amplitude the fit is allowed to choose.
+
+    pixe.pro forms its model as
+
+        result = signal + a[7]*background1 + a[10]*background2 + a[4]*pileup
+
+    so the background enters with a FREE amplitude, exactly like an element.
+    This package instead SUBTRACTED a fixed SNIP estimate, which is a
+    different thing and a worse one.
+
+    SNIP strips peaks down to the continuum, and next to a very large peak it
+    strips a little too deep - the peak's own wings look like peak to it. The
+    result is a background that is too low in a band a few hundred eV wide
+    around every strong line. Subtract that and the model is short there, and
+    the only way the fit can make up the difference is to inflate the element
+    that owns the peak. On donut2x the iron area came out 1.34x too large for
+    exactly this reason, with 47% of the total chi2 sitting 0.4-1.0 keV out
+    from the strong peaks where the model ran +20 sigma short.
+
+    Letting the amplitude float does not let the background eat real peaks:
+    its shape is fixed, and a smooth curve cannot take on a peak's shape. It
+    only lets the fit say the continuum is 1.1x what SNIP guessed, which is
+    the honest degree of freedom that was missing.
+    """
+
+    name = 'background'
+
+    def __init__(self, shape):
+        self._shape = np.asarray(shape, float)
+        self.tail_amp_fn = lambda E: 0.0
+        self.tail_len_fn = lambda E: 0.0
+
+    def profile(self, pars, n_channels):
+        b = self._shape
+        if len(b) < n_channels:
+            b = np.pad(b, (0, n_channels - len(b)))
+        return b[:n_channels]
+
+
 class SumPeakComponent:
     """Pile-up as GeoPIXE models it: discrete sum LINES, not a convolution.
 
@@ -337,7 +377,7 @@ def _linear_step_free(counts, background, components, pars, channels,
 def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
                  noise, fano, tail_amp=0.0, tail_len=0.0,
                  background=None, refine=('cal', 'width'), max_iter=12,
-                 verbose=False, nonneg=True):
+                 verbose=False, nonneg=True, fit_background=True):
     """Fit a PIXE spectrum.
 
     counts            spectrum
@@ -347,6 +387,11 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
     noise, fano       initial width parameters, in the GeoPIXE parameterisation
                       (channels; w^2 = noise^2 + fano^2*(E - e_low))
     background        pre-computed background, or None to SNIP it here
+    fit_background    give the background a free amplitude, as pixe.pro does,
+                      instead of subtracting it. See BackgroundComponent -
+                      subtracting a SNIP estimate near a strong peak leaves
+                      the model short and the fit inflates the element to
+                      compensate.
     refine            which non-linear groups to vary: 'cal', 'width', 'tail'
     """
     from .background import snip
@@ -356,6 +401,17 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
 
     if background is None:
         background = snip(counts, cal_a, cal_b, e_low, e_high)
+    background = np.asarray(background, float)
+
+    # GeoPIXE fits the background amplitude rather than subtracting a fixed
+    # estimate (pixe.pro: result = signal + a[7]*background1 + ...). Do the
+    # same: the SNIP curve becomes a component with a free amplitude, and
+    # nothing is subtracted from the data.
+    fitted_bg = None
+    if fit_background:
+        fitted_bg = BackgroundComponent(background)
+        components = list(components) + [fitted_bg]
+        background = np.zeros_like(background)
 
     # GeoPIXE references the centroid to eoc, so cal_b in ShapePars is the
     # channel of energy eoc, not of zero energy. Convert.

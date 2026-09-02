@@ -527,6 +527,42 @@ class Session:
                             passes=o.snip_passes, use_low_stats=True)
         return self._bk
 
+    def _apply_efficiency(self, lines):
+        """Weight an element's lines by the detector efficiency at each.
+
+        A line table gives ATOMIC intensities - what the atom emits. What the
+        detector records is that times the efficiency at each line's energy,
+        and when the efficiency varies across an element's own lines the two
+        are not proportional.
+
+        It is not a small effect. GeoPIXE's donut2x example sits behind 200 um
+        of aluminium, where efficiency runs 0.0054 at Fe Ka and 0.0194 at
+        Fe Kb - a factor of 3.6 across one element. The atomic Kb/Ka is 0.132,
+        so the RECORDED ratio should be 0.478; the spectrum measures 0.503.
+        Without this the Fe component is pinned at 0.132 and cannot fit both
+        lines, so the fit splits the difference: Ka overshoots by 1.34x, Kb
+        undershoots by 2.6x, and the area inflates to cover the gap.
+
+        Normalised to the strongest line, so a component's fitted area keeps
+        meaning counts in its major line and quantify()'s own efficiency
+        correction is not applied twice.
+        """
+        if self.efficiency is None or len(lines) < 2:
+            return lines
+        try:
+            e0 = max(lines, key=lambda t: t[1])[0]
+            ref = float(self.efficiency(e0))
+            if not (ref > 0):
+                return lines
+            out = []
+            for e, inten in lines:
+                r = float(self.efficiency(e)) / ref
+                if r > 0:
+                    out.append((e, inten * r))
+            return out or lines
+        except Exception:
+            return lines
+
     def build_components(self, spec):
         """spec: element symbols, or (Z, shell) pairs. Shell 1 = K, 2 = L,
         3 = M. 3d-metal L components get the broadened band shape, because
@@ -541,6 +577,7 @@ class Session:
             lines = self.db.line_list(Z, sh)
             if not lines:
                 continue
+            lines = self._apply_efficiency(lines)
             c = _fit.Component(self.db.sym[Z] + SHELL_SUFFIX[sh], lines,
                                escape=self.escape_model)
             if sh == 2 and 21 <= Z <= 30:

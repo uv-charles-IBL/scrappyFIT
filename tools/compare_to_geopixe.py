@@ -27,8 +27,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from scrappyfit.io.gpfit import (area_scale,                   # noqa: E402
                                  read_fit_results)
-from scrappyfit.io.gpdetector import (read_detector,           # noqa: E402
-                                      read_filter)
+from scrappyfit.io.gpdetector import (efficiency_curve,        # noqa: E402
+                                      read_detector, read_filter)
 from scrappyfit.io.gpspec import (calibration_from_pfr,        # noqa: E402
                                   read_spec, verify)
 from scrappyfit.session import Session                          # noqa: E402
@@ -126,6 +126,17 @@ def main(spec_path=SPEC, pfr_path=PFR):
             print('  external filter(s): %s'
                   % ', '.join('%.4g mg/cm2 Z=%s'
                               % (f['thick'], f['Z'][0]) for f in flt))
+        # The efficiency is not only for concentrations. It weights each
+        # LINE of every element, and behind 200 um of aluminium it varies
+        # 3.6x between Fe Ka and Fe Kb - without it no fit can satisfy both.
+        Eax = cal[0] * np.arange(len(spec)) + cal[1]
+        eff, _, _ = efficiency_curve(det, s.db, np.clip(Eax, 0.2, None),
+                                     mac='mixed', filters=flt)
+        eff = np.nan_to_num(eff)
+        s.efficiency = lambda e: float(np.interp(e, Eax, eff))
+        print('  efficiency: %.5f at Fe Ka, %.5f at Fe Kb (ratio %.2f)'
+              % (s.efficiency(6.404), s.efficiency(7.058),
+                 s.efficiency(7.058) / max(s.efficiency(6.404), 1e-12)))
     else:
         print('  WARNING: the detector named in the .pfr was not found, so '
               'this runs on the default silicon crystal')
