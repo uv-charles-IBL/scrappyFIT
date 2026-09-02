@@ -367,8 +367,31 @@ class MainWindow(QtWidgets.QMainWindow):
         b_art.clicked.connect(self.on_artefacts)
         b_nomark = QtWidgets.QPushButton('Clear markers')
         b_nomark.clicked.connect(lambda: self.spec.clear_markers())
+
+        # Explicit axis limits. Matplotlib's pan and zoom are there, but
+        # reading a fit needs an exact window - "show me 6.0 to 6.8 keV, full
+        # scale 700k" - and dragging cannot do that reproducibly.
+        self.ed_x0 = QtWidgets.QLineEdit()
+        self.ed_x1 = QtWidgets.QLineEdit()
+        self.ed_y1 = QtWidgets.QLineEdit()
+        for w, tip, ph in ((self.ed_x0, 'left edge, keV. Blank = fit range.',
+                            'x lo'),
+                           (self.ed_x1, 'right edge, keV. Blank = fit range.',
+                            'x hi'),
+                           (self.ed_y1, 'full scale in counts. Blank = auto.',
+                            'y max')):
+            w.setToolTip(tip)
+            w.setPlaceholderText(ph)
+            w.setMaximumWidth(70)
+            w.returnPressed.connect(self.on_axes)
+        b_ax = QtWidgets.QPushButton('Set axes')
+        b_ax.clicked.connect(self.on_axes)
+        b_axr = QtWidgets.QPushButton('Auto')
+        b_axr.setToolTip('Back to the fit range and automatic full scale.')
+        b_axr.clicked.connect(self.on_axes_reset)
         for x in (cb_log, cb_cmp, cb_lab, b_full, self.chk_id, b_pk,
-                  b_lab, b_art, b_nomark):
+                  b_lab, b_art, b_nomark,
+                  self.ed_x0, self.ed_x1, self.ed_y1, b_ax, b_axr):
             bar.addWidget(x)
         bar.addStretch(1)
         sv.addWidget(toolbar_for(self.spec, sw))
@@ -540,6 +563,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if s.events is None:
             self.say('  no event positions in this format - maps and masking '
                      'are unavailable (open the .lmf for those)')
+        # Fit range. The defaults are for 0.2-6.6 keV light-element work,
+        # and leaving them on a spectrum that runs to 43 keV is not a subtle
+        # error: the fit covers a few percent of the counts, every real peak
+        # is outside it, and the model comes back as one smooth curve with no
+        # peaks in it at all. Snap the range to the data whenever the current
+        # one misses most of the spectrum.
+        self._autorange()
+
         # Charge, if it can be had without asking. The run log beside the data
         # is the measurement; the LMF dose counter is a good proxy but carries
         # whatever digitiser range was set. Say which was used either way, so
@@ -1184,6 +1215,66 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cmb_eff.addItem(os.path.basename(path), path)
         self.cmb_eff.setCurrentIndex(self.cmb_eff.count() - 1)
 
+    def on_axes(self):
+        """Apply the typed axis limits to the spectrum plot."""
+        ax = self.spec.ax
+        o = self.session.options
+        x0 = self._f(self.ed_x0, o.e_low)
+        x1 = self._f(self.ed_x1, o.e_high)
+        if x1 > x0:
+            ax.set_xlim(x0, x1)
+        y1 = self._f(self.ed_y1)
+        if y1 and y1 > 0:
+            lo = 0.5 if ax.get_yscale() == 'log' else 0.0
+            ax.set_ylim(lo, y1)
+        self.spec.draw_idle()
+
+    def on_axes_reset(self):
+        for w in (self.ed_x0, self.ed_x1, self.ed_y1):
+            w.clear()
+        self.refresh_spectrum()
+
+    def _autorange(self, force=False):
+        """Set the fit range from the data when the current one does not fit.
+
+        Only moves when it has to: if the present range already covers most
+        of the counts it is left alone, because an operator who narrowed it
+        deliberately should not have it silently widened again.
+        """
+        s = self.session
+        if s.spectrum is None:
+            return
+        y = np.asarray(s.spectrum, float)
+        a, b = s.cal
+        E = a * np.arange(len(y)) + b
+        tot = y.sum()
+        if tot <= 0:
+            return
+        o = s.options
+        inside = y[(E >= o.e_low) & (E <= o.e_high)].sum() / tot
+        if inside > 0.60 and not force:
+            return
+
+        # the span holding the counts, trimmed of empty ends
+        nz = np.nonzero(y > 0)[0]
+        if len(nz) < 2:
+            return
+        lo = max(float(E[nz[0]]), a)          # never below one channel
+        hi = float(E[nz[-1]])
+        # ignore a sparse high tail: stop where 99.9% of the counts are in
+        c = np.cumsum(y) / tot
+        j = int(np.searchsorted(c, 0.999))
+        hi = min(hi, float(E[min(j + 20, len(E) - 1)]))
+        if hi <= lo:
+            return
+        o.e_low, o.e_high = round(lo, 4), round(hi, 4)
+        self.ed_elo.setText('%.4g' % o.e_low)
+        self.ed_ehi.setText('%.4g' % o.e_high)
+        self.say('  fit range set to %.3f - %.3f keV (the previous range '
+                 'held only %.1f%% of the counts)'
+                 % (o.e_low, o.e_high, 100 * inside))
+        s.invalidate()
+
     def _f(self, edit, default=None):
         t = edit.text().strip()
         if not t:
@@ -1470,6 +1561,8 @@ def main(argv=None):
     ap.add_argument('--elements', help='comma-separated symbols to select')
     ap.add_argument('--cal', help='gain,offset in keV per channel and keV')
     ap.add_argument('--eff', help='substring of a built-in efficiency curve')
+    ap.add_argument('--range', help='fit range as lo,hi in keV')
+    ap.add_argument('--detector', help='a GeoPIXE .detector file')
     ap.add_argument('--fit', action='store_true', help='fit once on startup')
     ns, rest = ap.parse_known_args(argv[1:])
 
@@ -1498,6 +1591,24 @@ def main(argv=None):
                         win.cmb_eff.setCurrentIndex(hit[0])
                 except Exception:
                     pass
+            if ns.detector:
+                try:
+                    win.session.load_detector(ns.detector)
+                    win.say('detector: %s' % ns.detector)
+                except Exception as ex:
+                    win.say('bad --detector (%s)' % ex)
+            if ns.range:
+                try:
+                    lo, hi = (float(x) for x in ns.range.split(','))
+                    win.ed_elo.setText('%.6g' % lo)
+                    win.ed_ehi.setText('%.6g' % hi)
+                    win.on_range_changed() if hasattr(win, 'on_range_changed')                         else win.on_cal_changed()
+                    win.session.options.e_low = lo
+                    win.session.options.e_high = hi
+                    win.session.invalidate()
+                    win.refresh_spectrum()
+                except Exception as ex:
+                    win.say('bad --range (%s)' % ex)
             if ns.elements:
                 # "Fe" means the K lines; "FeL" or "Fe:L" means the L lines
                 db = win.session.db
