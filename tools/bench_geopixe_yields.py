@@ -8,12 +8,11 @@ Three things this exists to catch, all of which it has caught:
 
   * a units error, which shows up as a ratio nowhere near one. This is how
     the 60x absolute-scale bug was found, and how it stays found.
-  * a wrong line-grouping convention, which shows up as a TREND in the ratio
-    against Z rather than an offset. GeoPIXE's .yield files store ELEMENT
-    TOTALS, not per-major-line yields; assuming the latter puts a -19% per
-    10 Z slope into the comparison, because the strongest single line drops
-    from about 0.88 of the K total to about 0.58 at Z = 28, where Ka1 and
-    Ka2 separate in the line table.
+  * a wrong line-grouping convention, which shows up as a STEP at Z = 28.
+    GeoPIXE's .yield files store the MAJOR LINE - the unresolved Ka group
+    below Z = 28, Ka1 alone above it, where the line table splits Ka1 from
+    Ka2. Comparing element totals instead puts a 1.53x step right there and
+    lifts the median from 1.02 to 1.48.
   * a layer model applied wrongly. Every layer has to be present, with the
     element assigned to the layer whose yield is being compared. Treating a
     2.6 mg/cm2 surface film as a thick target overstates its yield 3x.
@@ -74,11 +73,11 @@ def bench_one(path, db, mac='henke1993', fy='krause'):
                                        [''] * len(stack), stack))))
 
     for k in range(min(len(stack), row.shape[0])):
-        # per_major_line=False: GeoPIXE stores element totals (see the module
+        # per_major_line=True: GeoPIXE stores the major line (see the module
         # docstring). in_layer pins every element into the layer whose stored
         # yields are being compared against.
         mine = lym.yields(stack, zk, E0=E0, theta_deg=th, mac=mac, fy=fy,
-                          n_steps=900, per_major_line=False,
+                          n_steps=900, per_major_line=True,
                           in_layer={z: k for z in zk})
         gp = row[k]
         zs, rs = [], []

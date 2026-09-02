@@ -135,25 +135,31 @@ class YieldModel:
                 prevx, prevf = x, f
             y = tot * om * db.N_A_over_A(Z)
 
-            # CORRECTION, measured against GeoPIXE's own -REF.yield files:
-            # a .yield file stores the ELEMENT TOTAL, not the major line. The
-            # earlier note here claimed the opposite and it was wrong.
+            # GeoPIXE .yield files store the MAJOR LINE yield, not the
+            # element total, and the major line changes at Z = 28 where the
+            # line table splits Ka1 from Ka2. Below it the major line is the
+            # unresolved Ka group (about 0.88 of the K total); above it, Ka1
+            # alone (about 0.58).
             #
-            # The evidence is a trend, not an offset, which is what makes it
-            # convincing. The strongest single K line is about 0.88 of the K
-            # total below Z = 28 and about 0.58 above it, where Ka1 and Ka2
-            # separate in the line table. Applying that factor puts a slope of
-            # -19% per 10 Z into the comparison against GeoPIXE; removing it
-            # leaves +1.7% per 10 Z. GeoPIXE's own n_lines field does change
-            # at Z = 28, so it groups lines differently there too - but its
-            # stored yield does not step, which it would if the yield were
-            # per-line.
+            # v0.8.4 concluded the opposite and it was wrong. That conclusion
+            # came from a trend fit over Z = 15-54, where removing the branch
+            # happened to flatten a slope that had other causes. Comparing
+            # neighbours instead settles it immediately: GeoPIXE's stored
+            # yield falls from 3.576 at cobalt to 1.885 at nickel, a factor of
+            # 1.90 across one element. No K-shell yield does that. Undo the
+            # branch and the two are 4.045 and 3.221, a 1.26 ratio, which is
+            # the smooth decrease that belongs there.
             #
-            # per_major_line is kept because quantify() uses it: it multiplies
-            # the fitted area by the same branch, so the factor cancels and
-            # concentrations are unaffected by this choice. Anything comparing
-            # or writing GeoPIXE yields must pass per_major_line=False.
-            # tools/bench_geopixe_yields.py is the check.
+            # Pooled over every proton .yield file that ships with GeoPIXE,
+            # for Z >= 20:
+            #
+            #     per major line    median 1.017, 87% within 20%
+            #     element total     median 1.48,  29% within 20%,
+            #                       with a 1.53x step at Z = 28
+            #
+            # This is the default, so quantify() has always used the right
+            # convention - the v0.8.4 error reached the comment and the
+            # benchmark tool, not the concentrations.
             if per_major_line:
                 lines = db.line_list(Z, 1)
                 if lines:

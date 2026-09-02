@@ -171,8 +171,9 @@ def area_scale(rec, i, db):
     1.77x GeoPIXE's areas across nineteen elements, which reads as a
     systematic error; multiplying by the branch gives a median of 0.955.
 
-    Note this is the OPPOSITE convention to a .yield file, which does store
-    element totals. Two GeoPIXE formats, two conventions.
+    A .yield file uses the SAME convention - it also stores the major line -
+    so the two formats agree. An earlier note here claimed they were opposite;
+    that came from the v0.8.4 error corrected in physics/yields.py.
     """
     name = (rec['name'][i] or '').split()[0]
     Z = db.z.get(name.lower())
