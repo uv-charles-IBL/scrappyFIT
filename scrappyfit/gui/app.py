@@ -510,12 +510,21 @@ class MainWindow(QtWidgets.QMainWindow):
             'Text (*.txt *.spec);;All files (*)')
         if not path:
             return
+        self.open_path(path)
+
+    def open_path(self, path):
+        """Load a file and bring the whole window up to date.
+
+        on_open() is only the file dialog; everything after the load lives
+        here so that opening from the command line cannot drift out of step
+        with opening from the menu.
+        """
         try:
             self.session.load(path, adc=self.spin_adc.value())
         except Exception as ex:
             self.say('LOAD FAILED: %s' % ex)
             QtWidgets.QMessageBox.critical(self, 'Load failed', str(ex))
-            return
+            return False
         s = self.session
         self.lbl_file.setText('%s\n%s' % (os.path.basename(path), s.label))
         self.ed_gain.setText('%.7f' % s.cal[0])
@@ -544,6 +553,7 @@ class MainWindow(QtWidgets.QMainWindow):
                      'to 100 wt%% unless you type one in' % src)
         self._geom_changed()
         self.refresh_spectrum()
+        return True
 
     def on_adc_changed(self):
         if self.session.path and self.session.path.lower().endswith('.lmf'):
@@ -1359,17 +1369,74 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main(argv=None):
+    """python -m scrappyfit [file] [--elements C,N,O,...] [--fit] [--cal g,o]
+
+    The optional arguments exist so a spectrum can be put on screen already
+    loaded, already populated with elements, and already fitted - which is
+    what you want when someone else is going to watch the result rather than
+    drive the dialogs themselves.
+    """
+    import argparse
+
     argv = list(sys.argv if argv is None else argv)
-    app = QtWidgets.QApplication(argv)
+    ap = argparse.ArgumentParser(prog='scrappyfit', add_help=True)
+    ap.add_argument('path', nargs='?', help='.lmf, .spec, .dam or .txt')
+    ap.add_argument('--elements', help='comma-separated symbols to select')
+    ap.add_argument('--cal', help='gain,offset in keV per channel and keV')
+    ap.add_argument('--eff', help='substring of a built-in efficiency curve')
+    ap.add_argument('--fit', action='store_true', help='fit once on startup')
+    ns, rest = ap.parse_known_args(argv[1:])
+
+    app = QtWidgets.QApplication([argv[0]] + rest)
     app.setApplicationName('scrappyFIT')
     win = MainWindow()
     win.show()
-    if len(argv) > 1 and os.path.exists(argv[1]):
-        try:
-            win.session.load(argv[1])
-            win.refresh_spectrum()
-        except Exception:
-            pass
+
+    if ns.path:
+        if not os.path.exists(ns.path):
+            win.say('no such file: %s' % ns.path)
+        elif win.open_path(ns.path):
+            if ns.cal:
+                try:
+                    g, o = (float(x) for x in ns.cal.split(','))
+                    win.ed_gain.setText('%.7f' % g)
+                    win.ed_off.setText('%.5f' % o)
+                    win.on_cal_changed()
+                except Exception as ex:
+                    win.say('bad --cal (%s)' % ex)
+            if ns.eff:
+                try:
+                    hit = [i for i in range(win.cmb_eff.count())
+                           if ns.eff.lower() in win.cmb_eff.itemText(i).lower()]
+                    if hit:
+                        win.cmb_eff.setCurrentIndex(hit[0])
+                except Exception:
+                    pass
+            if ns.elements:
+                # "Fe" means the K lines; "FeL" or "Fe:L" means the L lines
+                db = win.session.db
+                pairs = []
+                for tok in ns.elements.split(','):
+                    tok = tok.strip().replace(':', '')
+                    if not tok:
+                        continue
+                    sh = 1
+                    if len(tok) > 1 and tok[-1] in 'LM':
+                        sh = 2 if tok[-1] == 'L' else 3
+                        tok = tok[:-1]
+                    Z = db.z.get(tok.lower())
+                    if Z:
+                        pairs.append((Z, sh))
+                    else:
+                        win.say('unknown element %r, skipped' % tok)
+                if pairs:
+                    win.elements.set_selection(pairs)
+                    win._on_elements_changed()
+                    win.refresh_spectrum()
+            if ns.fit:
+                # after the event loop starts, so the window is painted and
+                # visible before the fit begins rather than after it ends
+                QtCore.QTimer.singleShot(400, win.on_fit)
     return app.exec_()
 
 
