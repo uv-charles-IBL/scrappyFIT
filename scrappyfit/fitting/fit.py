@@ -24,7 +24,10 @@ anywhere else.
 
 import numpy as np
 
-from .peakshape import ShapePars, line_profile
+import copy as _copy
+
+from .peakshape import (P_FANO, P_NOISE, ShapePars,  # noqa: F401
+                        line_profile)
 
 
 class Component:
@@ -78,39 +81,130 @@ def pileup_component(components, pars, n_channels, areas=None, ratio=1.0):
     return ratio * full / max(m.sum(), 1.0)
 
 
-class PileupComponent:
-    """Pile-up as a fittable component with a free amplitude.
+def expected_pileup_fraction(total_counts, live_seconds,
+                             shaping_time_us=1.0):
+    """rate x tau: the chance a second photon arrives inside the shaping
+    time. First order, good to a factor of a few - ample to reject a fit that
+    is out by three orders of magnitude. None when the live time is unknown,
+    so the caller decides rather than being handed a guess."""
+    if not (total_counts and live_seconds and live_seconds > 0):
+        return None
+    return (float(total_counts) / float(live_seconds)) *         float(shaping_time_us) * 1e-6
 
-    Its shape is the self-convolution of every OTHER component, so it moves
-    when they do and carries no free shape parameters of its own - only how
-    much of it there is, which is what the count rate sets and what the fit
-    should determine.
 
-    Being a component rather than a fixed correction matters: pile-up sits in
-    otherwise empty regions of the spectrum, which is precisely where a fit
-    with nothing better to offer will place a spurious element. Modelling it
-    removes that opportunity instead of leaving it open.
+class SumPeakComponent:
+    """Pile-up as GeoPIXE models it: discrete sum LINES, not a convolution.
+
+    This replaces an earlier version that used the self-convolution of the
+    whole model. That was the wrong shape and it mattered enormously. A
+    self-convolution of a spectrum-plus-continuum is smooth, positive and
+    non-zero everywhere, so the fitter could use it to absorb any modelling
+    error anywhere. On run 287424 it took 22% of the spectrum, against a
+    physical expectation of 0.017% at 168 counts/s - out by a factor of 1300
+    - and it disguised the problem, because switching it off sent chi2 from
+    91 to 161 as though pile-up had been doing real work.
+
+    sum_peaks.pro builds something quite different: ONE pseudo-element whose
+    lines sit at every pairwise sum E_i + E_j of the strongest real lines,
+    with intensity proportional to the product of the parent AREAS. Those are
+    sharp features at specific energies. They can fit a sum peak and they
+    cannot fit a broad continuum error, which is exactly the property that
+    keeps the fit honest.
+
+    Following sum_peaks.pro:
+      check_double = 30   strongest lines combined pairwise
+      check_triple = 6    strongest also combined in threes
+      lines under 100 counts are ignored
+      sum_deficit         fraction lost to finite time resolution, 0.1
+
+    The intensities depend on the fitted areas, so the shape has to be
+    rebuilt as the fit converges - update() does that, and fit_spectrum
+    calls it between passes. The amplitude itself stays a single free
+    parameter, as a[4] is in pixe.pro.
     """
 
     name = 'pileup'
+    CHECK_DOUBLE = 30
+    CHECK_TRIPLE = 6
+    MIN_LINE_COUNTS = 100.0
 
-    def __init__(self, components):
+    def __init__(self, components, sum_deficit=0.1, e_high=None,
+                 max_area=None):
         self._src = list(components)
+        self.sum_deficit = float(sum_deficit)
+        self.e_high = e_high
+        self.max_area = max_area
+        self._lines = []                 # [(energy, weight)]
         self.tail_amp_fn = lambda E: 0.0
         self.tail_len_fn = lambda E: 0.0
 
-    def profile(self, pars, n_channels):
-        m = np.zeros(n_channels)
+    def update(self, areas):
+        """Rebuild the sum-line list from the current element areas.
+
+        areas: {component name: fitted area}. Lines are (parent area x line
+        intensity), the same product sum_peaks.pro forms.
+        """
+        strong = []
         for c in self._src:
-            m += c.profile(pars, n_channels)
-        t = m.sum()
-        if t <= 0:
-            return m
-        # unit-area self-convolution, so the fitted amplitude is directly the
-        # number of pile-up counts
-        full = np.convolve(m / t, m / t)[:n_channels]
-        ssum = full.sum()
-        return full / ssum if ssum > 0 else full
+            area = areas.get(getattr(c, 'name', None), 0.0)
+            if area <= 0.1:
+                continue
+            for e, inten in getattr(c, 'lines', ()) or ():
+                w = area * inten
+                if w > self.MIN_LINE_COUNTS:
+                    strong.append((w, float(e)))
+        strong.sort(reverse=True)
+
+        out = []
+        dbl = strong[:self.CHECK_DOUBLE]
+        for i, (wi, ei) in enumerate(dbl):
+            for j in range(i, len(dbl)):
+                wj, ej = dbl[j]
+                es = ei + ej
+                if self.e_high and es > self.e_high:
+                    continue
+                # the cross terms count twice: either photon can arrive first
+                out.append((es, wi * wj * (1.0 if i == j else 2.0)))
+        tri = strong[:self.CHECK_TRIPLE]
+        for i, (wi, ei) in enumerate(tri):
+            for j in range(i, len(tri)):
+                wj, ej = tri[j]
+                for k in range(j, len(tri)):
+                    wk, ek = tri[k]
+                    es = ei + ej + ek
+                    if self.e_high and es > self.e_high:
+                        continue
+                    out.append((es, wi * wj * wk))
+        total = sum(w for _, w in out)
+        if total > 0:
+            scale = (1.0 - self.sum_deficit) / total
+            out = [(e, w * scale) for e, w in out]
+        self._lines = out
+        return len(out)
+
+    def profile(self, pars, n_channels):
+        """Unit-area sum of the sum-peak lines.
+
+        Uses the same line_profile as every other component, so the sum peaks
+        get the detector's real width and tail rather than a bare Gaussian.
+        The width is then widened by sqrt(2): two independent events add
+        their variances, which is also the practical tell that a feature is a
+        sum peak rather than a line.
+        """
+        f = np.zeros(n_channels)
+        if not self._lines:
+            return f
+        # Two independent events add their variances, so a sum peak is
+        # sqrt(2) wider than a line at the same energy. Copy the parameters
+        # and scale the width terms rather than mutating the fit's own.
+        wide = _copy.copy(pars)
+        wide.a = np.array(pars.a, dtype=float)
+        wide.a[P_NOISE] *= np.sqrt(2.0)
+        wide.a[P_FANO] *= np.sqrt(2.0)
+        for e, w in self._lines:
+            f += line_profile(e, w, wide, n_channels, do_tail=False)
+        t = f.sum()
+        return f / t if t > 0 else f
 
 
 class FitResult:
@@ -148,6 +242,43 @@ def _weights(model, floor=1.0):
 
 def linear_step(counts, background, components, pars, channels,
                 n_iter=3, nonneg=True):
+    """Solve for areas, honouring any component that declares a max_area.
+
+    A capped component is solved unbounded first. If it comes back over its
+    cap it is PINNED at the cap - not dropped, because those counts are real
+    and still have to be accounted for - moved into the background, and the
+    remaining components re-solved against what is left. The degrees of
+    freedom drop accordingly, since a pinned component is no longer fitted.
+    """
+    caps = {i: c.max_area for i, c in enumerate(components)
+            if getattr(c, 'max_area', None) is not None}
+    areas, errors, chi2, ndf, A = _linear_step_free(
+        counts, background, components, pars, channels, n_iter, nonneg)
+    over = {i: lim for i, lim in caps.items() if areas[i] > lim}
+    if not over:
+        return areas, errors, chi2, ndf, A
+
+    pinned = np.zeros(len(counts))
+    for i, lim in over.items():
+        pinned += A[:, i] * lim
+    keep = [i for i in range(len(components)) if i not in over]
+    sub_a, sub_e, chi2, _, _ = _linear_step_free(
+        counts, background + pinned, [components[i] for i in keep],
+        pars, channels, n_iter, nonneg)
+
+    areas = np.zeros(len(components))
+    errors = np.zeros(len(components))
+    for j, i in enumerate(keep):
+        areas[i] = sub_a[j]
+        errors[i] = sub_e[j]
+    for i, lim in over.items():
+        areas[i] = lim
+        errors[i] = 0.0            # pinned, not measured
+    return areas, errors, chi2, len(channels) - len(keep), A
+
+
+def _linear_step_free(counts, background, components, pars, channels,
+                      n_iter=3, nonneg=True):
     """Solve for component areas at fixed shape parameters.
 
     Iterated because the weights depend on the model, which depends on the

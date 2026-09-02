@@ -90,6 +90,28 @@ class FitOptions:
         # invent an element. On quartz the Si+O sum at 2.24 keV is 488 counts
         # and gets assigned to mercury or niobium if it is not modelled.
         self.use_pileup = True
+        self.sum_deficit = 0.1
+        """Fraction of sum-peak amplitude lost to finite time resolution.
+
+        sum_peaks.pro's default. Two photons close enough in time to sum are
+        sometimes close enough to be rejected instead, so the sum peak is
+        always a little smaller than the raw product of the parent rates.
+        """
+        self.shaping_time_us = 1.0
+        """Amplifier shaping time, which sets how much pile-up is possible.
+
+        Pile-up probability is roughly (count rate) x (shaping time), so this
+        is what bounds the pile-up component. Too generous a value lets it
+        soak up model error; too mean a one forces real pile-up into the
+        elements. 1 us is typical for a digital pulse processor on an SDD.
+        """
+        self.pileup_headroom = 5.0
+        """How far above the first-order estimate the fit may still go.
+
+        rate x tau is good to a factor of a few, not to a factor of a
+        thousand, so the cap is deliberately loose. It exists to reject the
+        1300x excess seen on 287424, not to pin pile-up to three figures.
+        """
         # Silicon escape peaks, tied to their parent component rather than
         # fitted freely. Every line above the Si K edge produces one, so this
         # is not an exotic correction - it is part of the response of any
@@ -446,13 +468,33 @@ class Session:
         comps = self.build_components(elements)
         if not comps:
             raise ValueError('no fittable components in %r' % (elements,))
+        sump = None
         if o.use_pileup:
-            comps.append(_fit.PileupComponent(comps))
-        self._fit = _fit.fit_spectrum(
-            self.spectrum, a, b, comps, o.e_low, o.e_high,
-            noise=o.noise, fano=o.fano, tail_amp=o.tail_amp,
-            tail_len=o.tail_len, background=self.background,
-            refine=o.refine_groups(), nonneg=o.nonneg)
+            sump = _fit.SumPeakComponent(
+                comps, sum_deficit=o.sum_deficit, e_high=o.e_high,
+                max_area=self.pileup_cap())
+            comps = comps + [sump]
+
+        def go():
+            return _fit.fit_spectrum(
+                self.spectrum, a, b, comps, o.e_low, o.e_high,
+                noise=o.noise, fano=o.fano, tail_amp=o.tail_amp,
+                tail_len=o.tail_len, background=self.background,
+                refine=o.refine_groups(), nonneg=o.nonneg)
+
+        res = go()
+        if sump is not None:
+            # Sum-line intensities are products of the parent AREAS, which are
+            # not known until the elements have been fitted once. sum_peaks.pro
+            # has the same dependency and resolves it the same way: fit,
+            # rebuild the sum lines from the result, fit again. Two passes is
+            # enough - the sum peaks are a fraction of a percent, so their
+            # effect on the parent areas that generated them is negligible.
+            for _ in range(2):
+                if not sump.update(dict(zip(res.names, res.areas))):
+                    break
+                res = go()
+        self._fit = res
         return self._fit
 
     @property
@@ -586,6 +628,40 @@ class Session:
         if n <= 0:
             return None, 'no run log, and the dose counter is empty'
         return n * (quantum or self.UC_PER_DOSE_COUNT), 'LMF dose counter'
+
+    def live_seconds(self):
+        """Acquisition duration in seconds, from the LMF clocks. None if the
+        file does not carry them - and then the pile-up cap cannot be set."""
+        if not self.path or not str(self.path).lower().endswith('.lmf'):
+            return None
+        try:
+            from .io import lmf as _l
+            return _l.clocks(str(self.path)).get('duration_s')
+        except Exception:
+            return None
+
+    def pileup_cap(self):
+        """Largest pile-up area the measured count rate can justify.
+
+        None when the duration is unknown, which leaves the amplitude free -
+        the old behaviour, and the honest one when the rate cannot be
+        measured. Whenever the duration IS known the cap applies, because an
+        unbounded pile-up component is the single most effective way for this
+        fitter to hide a modelling error.
+        """
+        if self.spectrum is None:
+            return None
+        secs = self.live_seconds()
+        if not secs:
+            return None
+        total = float(np.sum(self.full_spectrum
+                             if self.full_spectrum is not None
+                             else self.spectrum))
+        frac = _fit.expected_pileup_fraction(
+            total, secs, self.options.shaping_time_us)
+        if frac is None:
+            return None
+        return frac * total * float(self.options.pileup_headroom)
 
     def closure(self, **kw):
         """The absolute sum, as a fraction of 100 wt%.
