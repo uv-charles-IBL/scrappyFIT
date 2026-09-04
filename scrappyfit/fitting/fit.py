@@ -166,7 +166,7 @@ class SumPeakComponent:
     name = 'pileup'
     CHECK_DOUBLE = 30
     CHECK_TRIPLE = 6
-    MIN_LINE_COUNTS = 100.0
+    MIN_REL = 0.0003        # sum_peaks.pro: ar > 0.0003 * ar[0]
 
     def __init__(self, components, sum_deficit=0.1, e_high=None,
                  max_area=None):
@@ -178,11 +178,35 @@ class SumPeakComponent:
         self.tail_amp_fn = lambda E: 0.0
         self.tail_len_fn = lambda E: 0.0
 
-    def update(self, areas):
+    def update(self, areas, amplitude=None):
         """Rebuild the sum-line list from the current element areas.
 
-        areas: {component name: fitted area}. Lines are (parent area x line
-        intensity), the same product sum_peaks.pro forms.
+        Follows sum_peaks.pro closely, including three things this got wrong
+        the first time:
+
+        1. TRIPLES ARE SCALED BY p_factor. GeoPIXE forms the double products
+           normalised to the strongest, r2 = d2/d2[0], and the triples as
+           r4 = p_factor * d4/d4[0], where p_factor = asum/ar[0] is the
+           pile-up probability. Without that factor the triple products - a
+           product of THREE areas rather than two - are larger than the
+           doubles by roughly the size of an area, about a million. The
+           component then peaks at three times the strongest line instead of
+           twice: on run 287427 it sat at 5.22 keV, which is 3 x Si Ka, when
+           the real sum peak is Si+O at 2.27 keV.
+
+        2. sum_deficit shifts the ENERGY, not the amplitude. sum_peaks.pro
+           forms e = (1 - sum_deficit/100) * (e_i + e_j): two pulses that
+           merge are slightly clipped, so the sum lands a little BELOW the
+           arithmetic sum. It is also a percentage, so 0.1 means 0.1%, not
+           10%.
+
+        3. Lines are selected relative to the strongest, ar > 0.0003*ar[0],
+           not against an absolute count.
+
+        amplitude: the sum component's own fitted area, for p_factor. On the
+        first pass it is unknown and only doubles are built, which is also
+        what sum_peaks.pro does - it requires asum > 1000 before it will
+        consider triples at all.
         """
         strong = []
         for c in self._src:
@@ -190,35 +214,43 @@ class SumPeakComponent:
             if area <= 0.1:
                 continue
             for e, inten in getattr(c, 'lines', ()) or ():
-                w = area * inten
-                if w > self.MIN_LINE_COUNTS:
-                    strong.append((w, float(e)))
+                strong.append((area * inten, float(e)))
+        if not strong:
+            self._lines = []
+            return 0
         strong.sort(reverse=True)
+        top = strong[0][0]
+        strong = [t for t in strong if t[0] > self.MIN_REL * top]
 
+        shift = 1.0 - self.sum_deficit / 100.0
         out = []
+
         dbl = strong[:self.CHECK_DOUBLE]
+        d0 = dbl[0][0] * dbl[0][0]
         for i, (wi, ei) in enumerate(dbl):
-            for j in range(i, len(dbl)):
-                wj, ej = dbl[j]
-                es = ei + ej
+            for j, (wj, ej) in enumerate(dbl):
+                es = shift * (ei + ej)
                 if self.e_high and es > self.e_high:
                     continue
-                # the cross terms count twice: either photon can arrive first
-                out.append((es, wi * wj * (1.0 if i == j else 2.0)))
-        tri = strong[:self.CHECK_TRIPLE]
-        for i, (wi, ei) in enumerate(tri):
-            for j in range(i, len(tri)):
-                wj, ej = tri[j]
-                for k in range(j, len(tri)):
-                    wk, ek = tri[k]
-                    es = ei + ej + ek
-                    if self.e_high and es > self.e_high:
-                        continue
-                    out.append((es, wi * wj * wk))
-        total = sum(w for _, w in out)
-        if total > 0:
-            scale = (1.0 - self.sum_deficit) / total
-            out = [(e, w * scale) for e, w in out]
+                out.append((es, wi * wj / d0))
+
+        # Triples, only once the amplitude is known and large enough to
+        # matter - the same gate sum_peaks.pro applies.
+        p_factor = (float(amplitude) / top) if (amplitude and top > 0) else 0.0
+        if amplitude and amplitude > 1000.0 and p_factor > 3.0e-4:
+            tri = strong[:self.CHECK_TRIPLE]
+            t0 = 3.0 * tri[0][0] ** 3
+            for wi, ei in tri:
+                for wj, ej in tri:
+                    for wk, ek in tri:
+                        es = shift * (ei + ej + ek)
+                        if self.e_high and es > self.e_high:
+                            continue
+                        out.append((es, p_factor * 3.0 * wi * wj * wk / t0))
+
+        tot = sum(w for _, w in out)
+        if tot > 0:
+            out = [(e, w / tot) for e, w in out]
         self._lines = out
         return len(out)
 

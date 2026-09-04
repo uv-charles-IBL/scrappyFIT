@@ -627,7 +627,8 @@ class Session:
             # enough - the sum peaks are a fraction of a percent, so their
             # effect on the parent areas that generated them is negligible.
             for _ in range(2):
-                if not sump.update(dict(zip(res.names, res.areas))):
+                got = dict(zip(res.names, res.areas))
+                if not sump.update(got, amplitude=got.get('pileup')):
                     break
                 res = go()
         self._fit = res

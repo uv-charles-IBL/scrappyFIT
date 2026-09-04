@@ -29,6 +29,13 @@ MODEL = '#D01C1F'         # the fit, the line you check first
 BACK = '#00857A'          # background
 COMP = '#1F4FD8'          # individual components
 
+#: Components that are never hidden by the small-component threshold, because
+#: they explain features no element does. name -> (colour, style, width)
+ARTEFACT_STYLE = {
+    'pileup': ('#C4187A', '-', 1.6),
+    'escape': ('#7B3FA8', '-', 1.4),
+}
+
 # Components are drawn in a rotating palette rather than one colour. With ten
 # overlapping elements a single hue is an unreadable thicket, and telling
 # which component is which is most of what the plot is for.
@@ -122,12 +129,28 @@ class SpectrumCanvas(FigureCanvasQTAgg):
                     if r.areas[i] <= 0:
                         continue
                     c = r.profiles[:n, i] * r.areas[i]
-                    if c.max() < 0.003 * max(y.max(), 1):
+                    special = nm in ARTEFACT_STYLE
+                    # Elements are hidden below 0.3% of the tallest peak, or
+                    # a busy spectrum turns into spaghetti. Artefacts are NOT
+                    # subject to that: pile-up on run 287427 is 58 counts
+                    # against a 700,000-count silicon peak, so the threshold
+                    # hid it completely - and pile-up is exactly the thing an
+                    # operator needs to SEE, because it is what stops them
+                    # assigning a real element to a sum peak. GeoPIXE shows
+                    # its 'sum' pseudo-element for the same reason.
+                    if not special and c.max() < 0.003 * max(y.max(), 1):
                         continue
-                    col = COMP_CYCLE[k % len(COMP_CYCLE)]
-                    k += 1
-                    self.ax.plot(E[:n], c + base, lw=1.0, alpha=0.75,
-                                 color=col)
+                    if special:
+                        col, ls, lw = ARTEFACT_STYLE[nm]
+                        self.ax.plot(E[:n], c + base, lw=lw, ls=ls,
+                                     color=col, alpha=0.95, zorder=3,
+                                     label='%s (%.0f counts)' % (nm,
+                                                                 r.areas[i]))
+                    else:
+                        col = COMP_CYCLE[k % len(COMP_CYCLE)]
+                        k += 1
+                        self.ax.plot(E[:n], c + base, lw=1.0, alpha=0.75,
+                                     color=col)
             # the model is drawn LAST so it is never buried under a component
             self.ax.plot(E[:n], r.model[:n], lw=1.8, color=MODEL, zorder=4,
                          label='fit  chi2r=%.2f' % r.reduced_chi2)
