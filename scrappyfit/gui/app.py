@@ -571,6 +571,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # one misses most of the spectrum.
         self._autorange()
 
+        # Width parameters are in channels, so a value tuned for one gain is
+        # wrong for another. Seed them from the tallest peak in the data.
+        est = s.estimate_resolution()
+        if est:
+            self.say('  resolution seeded from the data: %.0f eV FWHM at the '
+                     'tallest peak (noise %.1f, Fano %.2f channels)'
+                     % (est[2], est[0], est[1]))
+
         # Charge, if it can be had without asking. The run log beside the data
         # is the measurement; the LMF dose counter is a good proxy but carries
         # whatever digitiser range was set. Say which was used either way, so

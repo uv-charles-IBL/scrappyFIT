@@ -145,7 +145,7 @@ class LayeredYieldModel:
                 if klayer is not None and int(li[i]) != klayer:
                     continue
                 E = 0.5 * (es[i] + es[i - 1])
-                sig = db.sigma_K(Z, E, A1)
+                sig = db.sigma_K(Z, E, A1, Z1)
                 if sig <= 0:
                     continue
                 atten = math.exp(-0.5 * (mux[i] + mux[i - 1]))

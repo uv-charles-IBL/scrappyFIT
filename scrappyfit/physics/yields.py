@@ -123,14 +123,14 @@ class YieldModel:
             ngrid = 4000
             tot = 0.0
             prevx = 0.0
-            prevf = db.sigma_K(Z, es[0], A1)      # x = 0, no attenuation
+            prevf = db.sigma_K(Z, es[0], A1, Z1)      # x = 0, no attenuation
             for k in range(ngrid):
                 x = x0 * (xmax / x0) ** (k / float(ngrid - 1))
                 E = self._interp_E(xs, es, x)
                 if E <= 0.0:
                     f = 0.0
                 else:
-                    f = db.sigma_K(Z, E, A1) * math.exp(-mu * x / cos_t)
+                    f = db.sigma_K(Z, E, A1, Z1) * math.exp(-mu * x / cos_t)
                 tot += 0.5 * (f + prevf) * (x - prevx)
                 prevx, prevf = x, f
             y = tot * om * db.N_A_over_A(Z)

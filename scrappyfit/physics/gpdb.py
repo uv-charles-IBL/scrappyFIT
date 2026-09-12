@@ -190,19 +190,27 @@ class Database:
         setattr(self, 'x%s_e' % shell.lower(), grid)
         setattr(self, 'x%s' % shell.lower(), tab)
 
-    def sigma_K(self, Z, E_MeV, A1=1.0):
+    def sigma_K(self, Z, E_MeV, A1=1.0, Z1=1):
         """K-shell ionisation cross section, cm^2."""
-        return self.sigma_shell(Z, E_MeV, 'K', A1)
+        return self.sigma_shell(Z, E_MeV, 'K', A1, Z1)
 
-    def sigma_shell(self, Z, E_MeV, shell='K', A1=1.0):
-        """Ionisation cross section for a shell, cm^2. Tables are per 1 amu,
-        so the energy is scaled by the projectile mass as init_xsect notes.
+    def sigma_shell(self, Z, E_MeV, shell='K', A1=1.0, Z1=1):
+        """Ionisation cross section for a shell, cm^2.
+
+        The tables are for a unit-charge, 1 amu projectile. Two scalings
+        turn them into any light ion, both from ion_xsect_pixe.pro:
+          * the energy is divided by A1, since ionisation depends on the
+            projectile VELOCITY and the table is indexed by energy per amu
+          * the result is multiplied by Z1^2, the first-Born charge scaling
+        For 2 MeV 4He that is a lookup at 0.5 MeV/amu times four. Before
+        this the Z1^2 was missing, so any helium yield was low by 4x.
         L and M are TOTAL shell cross sections, not subshell-resolved."""
         tab = getattr(self, 'x%s' % shell.lower(), None)
         grid = getattr(self, 'x%s_e' % shell.lower(), None)
         if not tab or Z not in tab:
             return 0.0
         e = E_MeV / A1
+        z1sq = float(Z1) ** 2
         g, s = grid, tab[Z]
         if e <= g[0] or e >= g[-1]:
             return 0.0
@@ -212,8 +220,8 @@ class Database:
                     return 0.0
                 f = ((math.log(e) - math.log(g[i - 1])) /
                      (math.log(g[i]) - math.log(g[i - 1])))
-                return math.exp(math.log(s[i - 1]) + f *
-                                (math.log(s[i]) - math.log(s[i - 1])))
+                return z1sq * math.exp(math.log(s[i - 1]) + f *
+                                       (math.log(s[i]) - math.log(s[i - 1])))
         return 0.0
 
     # -- proton stopping, Andersen-Ziegler as in dedx.pro -------------------
@@ -225,6 +233,15 @@ class Database:
             v = [_f(x) for x in line.split(',')]
             if len(v) >= 14:
                 self.pcoef[Z] = v
+        # Ziegler helium coefficients, one row per element, used by dedx()
+        # for Z1 = 2 exactly as dedx.pro's DEDXA branch does.
+        self.acoef = {}
+        apath = os.path.join(self.dat, 'alpha.txt')
+        if os.path.exists(apath):
+            for Z, line in enumerate(open(apath, errors='ignore'), start=1):
+                v = [_f(x) for x in line.split(',')]
+                if len(v) >= 5:
+                    self.acoef[Z] = v
 
     def _dedxp(self, eprot, A):
         """Hydrogen electronic stopping, eV/(1e15 atoms/cm^2)."""
@@ -254,14 +271,41 @@ class Database:
                     (1.0 + 6.8 * eps + 3.4 * eps ** 1.5))
         return conv * math.log(0.47 * eps) / (2.0 * eps)
 
-    def dedx(self, Z1, A1, Z2, E_MeV):
-        """Stopping power in MeV/(mg/cm^2). Protons only (Z1 = 1)."""
-        if Z1 != 1 or Z2 not in self.pcoef:
+    def _dedxa(self, EK, A):
+        """Helium electronic stopping, dedx.pro's DEDXA.
+
+        EK is the energy in keV already scaled to 4.0026 amu, i.e.
+        A1 * E_keV / 4.0026, so the same table serves 3He and 4He.
+        """
+        small = 1.0e-10
+        E = EK / 1000.0
+        if E <= 0:
             return 0.0
-        E_eV = 1000.0 * E_MeV
+        SL = A[0] * EK ** A[1]
+        SH = A[2] * math.log(1.0 + A[3] / E + A[4] * E) / E
+        if SL < small:
+            return SL
+        if SH < small:
+            return SH
+        return 1.0 / (1.0 / SL + 1.0 / SH)
+
+    def dedx(self, Z1, A1, Z2, E_MeV):
+        """Stopping power in MeV/(mg/cm^2), for protons (Z1 = 1) and
+        helium (Z1 = 2), following dedx.pro. Heavier ions are not handled
+        and return 0 rather than a guess."""
+        E_keV = 1000.0 * E_MeV
         A2 = self.A[Z2]
-        se = self._dedxp(E_eV / A1, self.pcoef[Z2])
-        sn = self._dedxn(Z1, Z2, A1, A2, E_eV)
+        if Z1 == 1:
+            if Z2 not in self.pcoef:
+                return 0.0
+            se = self._dedxp(E_keV / A1, self.pcoef[Z2])
+        elif Z1 == 2:
+            if Z2 not in self.acoef:
+                return 0.0
+            se = self._dedxa(A1 * E_keV / 4.0026, self.acoef[Z2])
+        else:
+            return 0.0
+        sn = self._dedxn(Z1, Z2, A1, A2, E_keV)
         return (se + sn) * DEDX_CONV / A2
 
     def dedx_compound(self, Z1, A1, zlist, wfrac, E_MeV):

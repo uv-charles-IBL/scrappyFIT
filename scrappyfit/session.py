@@ -578,6 +578,14 @@ class Session:
             if not lines:
                 continue
             lines = self._apply_efficiency(lines)
+            # A component whose lines all sit outside the fit range has no
+            # data to constrain it. Its design column is ~zero inside the
+            # window, the solve is ill-conditioned there, and the area comes
+            # back as any number at all - oxygen fitted to 1.7e13 counts on a
+            # spectrum that started at 0.9 keV. Refuse it instead.
+            o = self.options
+            if not any(o.e_low <= e <= o.e_high for e, i in lines if i > 0.01):
+                continue
             c = _fit.Component(self.db.sym[Z] + SHELL_SUFFIX[sh], lines,
                                escape=self.escape_model)
             if sh == 2 and 21 <= Z <= 30:
@@ -765,6 +773,50 @@ class Session:
         if n <= 0:
             return None, 'no run log, and the dose counter is empty'
         return n * (quantum or self.UC_PER_DOSE_COUNT), 'LMF dose counter'
+
+    def estimate_resolution(self, apply=True):
+        """Initial noise and Fano from the strongest peak in the data.
+
+        The width parameters are in CHANNELS, so a value tuned for one gain
+        is wrong for another - 32.7 channels of noise means 55 eV at
+        1.7 eV/ch and 150 eV at 4.6 eV/ch. Starting the refinement from the
+        wrong regime leaves it stuck: on run 354016 the LEPIXE defaults gave
+        chi2 43.6 with the width barely moving, and a start near the right
+        value gave 6.8.
+
+        Measures the FWHM of the tallest peak and seeds noise from it, with
+        Fano at a fraction that keeps the energy dependence sane. Returns
+        (noise, fano, fwhm_eV). Nothing is applied when the spectrum is
+        empty or the peak is too weak to measure.
+        """
+        if self.spectrum is None:
+            return None
+        y = np.asarray(self.spectrum, float)
+        a, b = self.cal
+        i = int(np.argmax(y))
+        if y[i] < 50:
+            return None
+        half = y[i] / 2.0
+        lo = i
+        while lo > 0 and y[lo] > half:
+            lo -= 1
+        hi = i
+        while hi < len(y) - 1 and y[hi] > half:
+            hi += 1
+        fw = float(hi - lo)
+        if fw < 2:
+            return None
+        E = a * i + b
+        # fwhm_ch^2 = noise^2 + fano^2 (E - e_low); split it as GeoPIXE's
+        # detector defaults do, with the Fano term about a quarter of the
+        # width at this energy
+        fano = 0.5 * fw / max(np.sqrt(max(E - self.options.e_low, 0.5)), 1.0)
+        noise2 = fw * fw - fano * fano * max(E - self.options.e_low, 0.0)
+        noise = float(np.sqrt(max(noise2, 1.0)))
+        if apply:
+            self.options.noise, self.options.fano = noise, fano
+            self.invalidate()
+        return noise, fano, 1000.0 * fw * a
 
     def live_seconds(self):
         """Acquisition duration in seconds, from the LMF clocks. None if the
