@@ -63,6 +63,17 @@ def _sample_name(strings):
     return best
 
 
+#: M-subshell fractions of the total M yield, MEASURED on 2 MeV 4He gold
+#: spectra (runs 380001 and 381001, 983k and 1.15M Au M counts) where the
+#: subshells are fully resolved by the statistics. The two agreed to the
+#: third decimal. Used as a soft prior so that a weak spectrum, where the
+#: 81 eV M4/M5 pair is degenerate, defers to them; a strong one overrides
+#: them. They are for helium at 0.5 MeV/amu on gold and are the best
+#: available for other heavy elements only until measured.
+M_SUBSHELL_PRIOR = {'M5': 0.555, 'M4': 0.385, 'Mz': 0.0065,
+                    'M3': 0.0375, 'M2': 0.014, 'M1': 0.002}
+
+
 class FitOptions:
     """Everything that changes a fit result, in one place so it can be saved
     beside the numbers. A result without its options is not reproducible."""
@@ -648,6 +659,10 @@ class Session:
                             continue
                         c = _fit.Component(self.db.sym[Z] + sub, ll,
                                            escape=self.escape_model)
+                        # soft prior on the subshell fractions - see
+                        # M_SUBSHELL_PRIOR for where the numbers come from
+                        c.prior_group = self.db.sym[Z] + 'M'
+                        c.prior_fraction = M_SUBSHELL_PRIOR.get(sub)
                         if self._tail_fns is not None:
                             c.tail_amp_fn, c.tail_len_fn = self._tail_fns
                         else:
@@ -725,6 +740,38 @@ class Session:
     @property
     def fit(self):
         return self._fit
+
+    def unexplained_peaks(self, top=5):
+        """Residual peaks of the last fit with candidate lines.
+
+        [(E_keV, excess, sigma, ['As Ka', 'Pb La', ...]), ...] largest first.
+        The candidates are the K, L and M major lines within one FWHM of
+        the peak, nearest first, so the user can see at a glance which
+        element the fit was missing. This is the check that would have
+        caught As on 380006 and the width blow-up it caused.
+        """
+        if self._fit is None:
+            return []
+        o = self.options
+        a, b = self.cal
+        fw = 1000.0 * a * float(np.sqrt(o.noise ** 2 + o.fano ** 2 * 5.0))
+        pk = self._fit.residual_peaks(self.spectrum, a, b, o.e_low,
+                                      o.e_high, fwhm_ev=fw, top=top)
+        out = []
+        for E, ex, sg in pk:
+            cands = []
+            for Z in range(11, 93):
+                for sh, tag in ((1, 'Ka'), (2, 'La'), (3, 'Ma')):
+                    le = self.db.line_energy(Z, sh) if sh == 1 else 0.0
+                    if sh == 2:
+                        le = self.db.lineE.get(Z, {}).get('La1', 0.0) or                             self.db.lineE.get(Z, {}).get('La_', 0.0)
+                    if sh == 3:
+                        le = self.db.lineE.get(Z, {}).get('Ma1', 0.0)
+                    if le and abs(le - E) * 1000.0 < fw:
+                        cands.append((abs(le - E), '%s %s' % (self.db.sym[Z], tag)))
+            cands.sort()
+            out.append((E, ex, sg, [c for _, c in cands[:4]]))
+        return out
 
     def areas(self):
         return {} if self._fit is None else dict(

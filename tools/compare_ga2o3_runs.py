@@ -24,8 +24,11 @@ D = r'C:\Users\Charles\Desktop\GeoPIXE-main\data\Ga2O3\nigels sample analysis'
 G = r'C:\Users\Charles\Desktop\GeoPIXE Install\GeoPIXE'
 CAL = (0.0091636, -2.07536)
 DET = os.path.join(G, 'Amptek_25_C1_deflector.detector')
-ELS = [(31, 1), (31, 2), (79, 2), (79, 3), (22, 1), (13, 1), (14, 1), (29, 1)]
-SHOW = ['Ti', 'Cu', 'Ga', 'AuL', 'AuM']
+# As is in the Ga-rich runs (380006, 380008): As Ka at 10.54 keV, 2700 and
+# 4200 counts. Without it the fit broadened every peak to cover it.
+ELS = [(31, 1), (31, 2), (79, 2), (79, 3), (22, 1), (13, 1), (14, 1), (29, 1),
+       (33, 1), (33, 2)]
+SHOW = ['Ti', 'Cu', 'Ga', 'AuL', 'AuM', 'As']
 WIN = {'Ti': 'TiKa', 'Cu': 'CuKa', 'Ga': 'GaKa', 'AuL': 'AuLa'}
 
 
@@ -69,12 +72,16 @@ def main():
                 win[k] = int(img.sum())
         rows.append((run, cap, q, r.reduced_chi2, ar, win))
         print('%s  chi2 %6.2f  Q %.3f uC  %s' % (run, r.reduced_chi2, q, cap[:50]))
+        for E, ex, sg, cands in s.unexplained_peaks(2):
+            if sg >= 8.0:
+                print('        unexplained %.2f keV %6.0f counts %5.1f sigma  %s'
+                      % (E, ex, sg, ', '.join(cands)))
 
     print()
     print('FITTED AREA per uC, and the ratio to GeoPIXE window map where one exists')
-    print('%-7s %8s | %9s %6s | %9s %6s | %9s %6s | %9s %6s | %9s'
+    print('%-7s %8s | %9s %6s | %9s %6s | %9s %6s | %9s %6s | %9s | %9s'
           % ('run', 'chi2', 'Ti', 'w/f', 'Cu', 'w/f', 'Ga', 'w/f', 'AuL', 'w/f',
-             'AuM'))
+             'AuM', 'As'))
     print('-' * 100)
     for run, cap, q, chi, ar, win in rows:
         cells = ['%-7s %8.2f' % (run, chi)]
@@ -82,7 +89,7 @@ def main():
             a = ar.get(k, 0.0) / q if q else float('nan')
             w = win.get(k)
             rat = (w / ar[k]) if (w and ar.get(k, 0) > 0) else None
-            if k == 'AuM':
+            if k in ('AuM', 'As'):
                 cells.append('%9.0f' % a)
             else:
                 cells.append('%9.0f %6s' % (a, ('%.2f' % rat) if rat else '-'))

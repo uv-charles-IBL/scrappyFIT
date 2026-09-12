@@ -668,6 +668,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     ' [%s]' % s.mask_name if s.mask_name else ''))
         self.fill_table(r)
         self.refresh_spectrum()
+        # What the fit could not explain. A peak here that lines up with an
+        # element not in the list is the usual cause of a bad chi2 - and,
+        # until the width was bounded, of a fit that smeared over it.
+        try:
+            pk = s.unexplained_peaks(3)
+        except Exception:
+            pk = []
+        for E, ex, sg, cands in pk:
+            if sg < 8.0:
+                continue
+            self.log.appendPlainText(
+                '  unexplained peak at %.2f keV: %.0f counts (%.0f sigma)'
+                '  candidates: %s' % (E, ex, sg, ', '.join(cands) or '?'))
 
     def fill_table(self, r):
         conc = {}

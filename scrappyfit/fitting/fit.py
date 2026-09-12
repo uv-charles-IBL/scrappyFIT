@@ -92,6 +92,13 @@ def expected_pileup_fraction(total_counts, live_seconds,
     return (float(total_counts) / float(live_seconds)) *         float(shaping_time_us) * 1e-6
 
 
+#: How strongly a subshell prior pulls, as the fraction of the group's own
+#: counts it is worth. 0.05 means the prior is as persuasive as 5% of the
+#: gold that was measured: decisive on a weak spectrum, irrelevant on a
+#: strong one. Keyed by group name, None for the default.
+PRIOR_STRENGTH = {None: 0.05}
+
+
 class BackgroundComponent:
     """The continuum, with an amplitude the fit is allowed to choose.
 
@@ -296,6 +303,39 @@ class FitResult:
     def reduced_chi2(self):
         return self.chi2 / self.ndf if self.ndf > 0 else float('nan')
 
+    def residual_peaks(self, counts, cal_a, cal_b, e_low, e_high,
+                       fwhm_ev=160.0, min_sigma=4.0, top=5):
+        """Peaks the model does not explain, largest first.
+
+        Each is (energy_keV, excess_counts, significance). The residual
+        (data - model) is smoothed over one FWHM, so a single noisy channel
+        does not register but a real line does; a peak is reported when its
+        summed excess exceeds min_sigma standard deviations of the model
+        counts under it. On run 380006 this reports 2700 counts at 10.54
+        keV at 34 sigma - arsenic, which was not in the element list.
+        """
+        n = len(counts)
+        E = cal_a * np.arange(n) + cal_b
+        r = counts.astype(float) - self.model
+        w = max(int(round(fwhm_ev / 1000.0 / cal_a)), 1)
+        k = np.ones(w)
+        excess = np.convolve(r, k, mode='same')
+        var = np.convolve(np.maximum(self.model, 1.0), k, mode='same')
+        sig = excess / np.sqrt(var)
+        inside = (E >= e_low) & (E <= e_high)
+        found = []
+        taken = np.zeros(n, dtype=bool)
+        for i in np.argsort(-sig):
+            if not inside[i] or taken[i] or sig[i] < min_sigma:
+                if sig[i] < min_sigma:
+                    break
+                continue
+            found.append((float(E[i]), float(excess[i]), float(sig[i])))
+            taken[max(i - 2 * w, 0):i + 2 * w + 1] = True
+            if len(found) >= top:
+                break
+        return found
+
     def table(self):
         out = ['  component      area        error      rel.err',
                '  ' + '-' * 46]
@@ -371,10 +411,65 @@ def _linear_step_free(counts, background, components, pars, channels,
     Ac = A[channels, :]
     yc = counts[channels] - background[channels]
 
+    # Soft priors on the ratio of components within a group.
+    #
+    # Components carrying the same .prior_group and a .prior_fraction f_i
+    # are pulled toward a_i = f_i * sum(group). That is a linear condition
+    # on the areas, so it enters the least-squares problem as extra rows:
+    #
+    #     sqrt(lam) * (a_i - f_i * sum_j a_j) = 0
+    #
+    # The weight lam is set from the data so the prior carries the
+    # statistical weight of a chosen fraction of the group's own counts -
+    # a strong-gold spectrum overrides it and a weak one defers to it,
+    # which is the whole point. Without this, two subshells whose main
+    # lines sit 81 eV apart under a 130 eV FWHM are degenerate on a weak
+    # spectrum, and on 380006 the fit put all of M4 into M5.
+    groups = {}
+    for i, c in enumerate(components):
+        g = getattr(c, 'prior_group', None)
+        f = getattr(c, 'prior_fraction', None)
+        if g is not None and f is not None:
+            groups.setdefault(g, []).append((i, float(f)))
+    prior_rows, prior_rhs, prior_w = [], [], []
+    if groups:
+        # a first unconstrained pass sets the scale of each group
+        w0 = _weights(np.maximum(counts[channels], 1.0))
+        try:
+            a0 = np.linalg.lstsq(Ac * np.sqrt(w0)[:, None],
+                                 yc * np.sqrt(w0), rcond=None)[0]
+        except Exception:
+            a0 = np.zeros(A.shape[1])
+        for g, members in groups.items():
+            tot = max(sum(max(a0[i], 0.0) for i, _ in members), 1.0)
+            strength = PRIOR_STRENGTH.get(g, PRIOR_STRENGTH.get(None, 0.05))
+            # The row's residual is (a_i - f_i * total), in counts. Give it
+            # a standard deviation of strength x total, so a departure of
+            # 5% of the group costs one sigma; the weight is the inverse
+            # variance, the same footing as the data rows (1 / counts).
+            # The first version used strength x total as the WEIGHT, which
+            # is ten orders of magnitude too strong - it pinned the strong
+            # runs to the prior exactly and worsened their chi2.
+            lam = 1.0 / (strength * tot) ** 2
+            for i, f in members:
+                row = np.zeros(A.shape[1])
+                row[i] = 1.0
+                for j, _ in members:
+                    row[j] -= f
+                prior_rows.append(row)
+                prior_rhs.append(0.0)
+                prior_w.append(lam)
+    if prior_rows:
+        Ac = np.vstack([Ac, np.array(prior_rows)])
+        yc = np.concatenate([yc, np.array(prior_rhs)])
+        prior_w = np.array(prior_w)
+
     model = np.maximum(counts[channels], 1.0)
     areas = None
     for _ in range(n_iter):
         w = _weights(model)
+        if prior_rows:
+            w = np.concatenate([w, prior_w])
         Aw = Ac * w[:, None]
         M = Ac.T @ Aw
         v = Aw.T @ yc
@@ -396,9 +491,13 @@ def _linear_step_free(counts, background, components, pars, channels,
             areas_w = np.maximum(areas, 0.0)
         else:
             areas_w = areas
-        model = np.maximum(Ac @ areas_w + background[channels], 1.0)
+        model = np.maximum((Ac @ areas_w)[:len(channels)]
+                           + background[channels], 1.0)
 
-    resid = yc - Ac @ areas
+    # chi2 over the DATA rows only; the prior rows are a regulariser, not
+    # a measurement, and must not be reported as goodness of fit
+    nd = len(channels)
+    resid = yc[:nd] - Ac[:nd] @ areas
     w = _weights(model)
     chi2 = float(np.sum(w * resid ** 2))
     ndf = len(channels) - len(components)
@@ -538,9 +637,22 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
     idxs = [i for i, _ in active]
     if idxs:
         from scipy.optimize import least_squares
+        x0 = np.array([pars.a[i] for i in idxs], dtype=float)
         lower = [(0.0 if i in (8, 9, 11, 12, 13, 14) else -np.inf)
                  for i in idxs]
-        x0 = np.array([pars.a[i] for i in idxs], dtype=float)
+        upper = [np.inf] * len(idxs)
+        # The width is a property of the detector, not of the spectrum, so
+        # it may only move within a factor of two of where it started (the
+        # detector file). Unbounded, a missing element lets the optimiser
+        # broaden every peak to smear over the unexplained one: on run
+        # 380006 an unfitted As Ka took the FWHM at 9 keV from 158 eV to
+        # 343 eV and cost the Au M4/M5 ratio. With the bound the misfit
+        # stays visible as a residual peak, which is where it belongs.
+        for k, i in enumerate(idxs):
+            if i in (0, 1) and x0[k] > 0:
+                lower[k] = 0.5 * x0[k]
+                upper[k] = 2.0 * x0[k]
+
         # scale each parameter so a unit step is a sensible move in it
         scale = np.array([max(abs(st), 1e-6) for _, st in active])
 
@@ -560,7 +672,7 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
             return (counts[channels] - m) / np.sqrt(np.maximum(m, 1.0))
 
         try:
-            sol = least_squares(resid, x0, bounds=(lower, np.inf),
+            sol = least_squares(resid, x0, bounds=(lower, upper),
                                 x_scale=scale, method='trf',
                                 max_nfev=12 * max(len(idxs), 1),
                                 ftol=1e-5, xtol=1e-5)
