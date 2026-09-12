@@ -476,6 +476,69 @@ class Database:
         v = (c[0] + Z * (c[1] + Z * (c[2] + Z * c[3]))) ** 4
         return v / (1.0 + v)
 
+    def m_subshell_lines(self, Z, min_rate=0.002):
+        """M-shell transitions grouped by initial subshell, from xraylib.
+
+        {'M1': [(E, rate)], ..., 'M5': [...]} with rates normalised within
+        each subshell. Returns {} when xraylib is not installed or Z has no
+        M lines above 1 keV.
+
+        Why this exists. The line table carries five M lines - Ma, Mb, Mg,
+        Mz and one more - which is the M4 and M5 story only. The M1, M2 and
+        M3 subshells radiate too: for gold, M2-N4 at 2.796, M1-N2 at 2.781,
+        M3-N1 at 1.984, M2-N1 at 2.389, M1-N3 at 2.880 keV. On a 2 MeV
+        helium spectrum with 983,000 Au M counts those lines are thousands
+        of counts each, and they sit on Si Ka and the Ti escape. Fitting the
+        five-line table gave chi2 43.6 with silicon driven to zero; the full
+        series, one free component per subshell, gave 5.6 and Si 1623.
+
+        The relative POPULATION of the subshells depends on the projectile
+        and is not in the radiative rates, which is exactly why they are
+        returned per subshell - so each can be a component of its own and
+        the data sets the ratio, as GeoPIXE already does for L1, L2, L3.
+        """
+        try:
+            import xraylib as xl
+        except ImportError:
+            return {}
+        import re
+        out = {}
+        for name in dir(xl):
+            m = re.match(r'^(M[1-5])[NOP]\d_LINE$', name)
+            if not m:
+                continue
+            try:
+                e = xl.LineEnergy(Z, getattr(xl, name))
+                r = xl.RadRate(Z, getattr(xl, name))
+            except Exception:
+                continue
+            if e > 1.0 and r > min_rate:
+                out.setdefault(m.group(1), []).append((float(e), float(r)))
+        # The Mz transitions - M4-N2, M4-N3, M5-N3 - are pulled out into a
+        # group of their own. xraylib's radiative rates put them near 8% of
+        # the M4+M5 decay; the gold data reads 0.6%. Tied at the rate they
+        # dump ~80,000 counts at 1.65 keV on a spectrum that holds ~6,000
+        # there and take silicon with them. As a free group the data sets
+        # them, which is the point of splitting at all.
+        mz = []
+        for k in ('M4', 'M5'):
+            keep = []
+            for e, r in out.get(k, []):
+                if e < 1.9:
+                    mz.append((e, r))
+                else:
+                    keep.append((e, r))
+            if keep:
+                out[k] = keep
+            elif k in out:
+                del out[k]
+        if mz:
+            out['Mz'] = mz
+        for k, v in list(out.items()):
+            t = sum(r for _, r in v)
+            out[k] = sorted([(e, r / t) for e, r in v], key=lambda t2: -t2[1])
+        return out
+
     # -- convenience ---------------------------------------------------------
 
     # GeoPIXE's line-splitting thresholds, from line_split_definitions.def

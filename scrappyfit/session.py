@@ -74,7 +74,15 @@ class FitOptions:
         self.fano = 28.05
         self.tail_amp = 0.08
         self.tail_len = 1.0
+        self.split_m_subshells = True
+        """Fit M-shell elements as five subshell components (M1..M5) with
+        the full xraylib transition list, instead of the table's five lines.
+        See Database.m_subshell_lines for why. Needs xraylib; falls back to
+        the table when it is absent."""
         self.snip_passes = 3
+        self.snip_passes_geopixe = True
+        """Use strip_clip.pro's pass count (8, or 4 when boosted) rather
+        than snip_passes. Set False to control the count by hand."""
         self.mac = 'mixed'
         self.fluor_yield = 'krause'
         self.fluor_elam_zmax = 10
@@ -520,11 +528,56 @@ class Session:
 
     @property
     def background(self):
+        """The SNIP background, built the way strip_clip.pro builds it.
+
+        background.snip() is a port of strip_clip.pro and takes everything
+        GeoPIXE gives it. This property used to call it with none of that -
+        no transmission boost, no detector width, three passes - and the
+        result was a background that over-read the low-energy continuum
+        2.2x on run 380001 and could not follow the 2-3 keV bremsstrahlung
+        hump at all. Three inputs matter:
+
+          trans   detector efficiency x filter x sample self-absorption. The
+                  spectrum is divided by this BEFORE stripping and the strip
+                  multiplied back after, so the clip follows the true
+                  continuum rather than one bent by the efficiency roll-off.
+                  boost_back.pro softens it with an atan cap so that a
+                  vanishing efficiency does not blow the boost up.
+          w0, w1  the detector's resolution, so the clip width tracks the
+                  real peak width at every energy (2 x FWHM). The defaults
+                  are for a 160 eV detector, which is the wrong width here.
+          passes  strip_clip.pro defaults to 8, halved to 4 when boosting.
+        """
         if self._bk is None:
             o = self.options
             a, b = self.cal
+            n = len(self.spectrum)
+            E = a * np.arange(n) + b
+
+            trans = None
+            if self.efficiency is not None:
+                from .fitting.background import boost_correction
+                try:
+                    eff = np.array([self.efficiency(max(e, 0.05)) for e in E])
+                    trans = boost_correction(E, eff=eff)
+                    # boost_back.pro: trans = 1 / (cap * atan((1/trans)/cap))
+                    cap = 100.0
+                    trans = 1.0 / (cap * np.arctan((1.0 / trans) / cap))
+                except Exception:
+                    trans = None
+
+            w0 = w1 = None
+            det = self.detector
+            if det and det.get('w0') and det.get('w1'):
+                w0, w1 = float(det['w0']), float(det['w1'])
+
+            passes = o.snip_passes
+            if getattr(o, 'snip_passes_geopixe', True):
+                passes = 8 if trans is None else 4
+
             self._bk = snip(self.spectrum, a, b, o.e_low, o.e_high,
-                            passes=o.snip_passes, use_low_stats=True)
+                            passes=passes, w0=w0, w1=w1, trans=trans,
+                            use_low_stats=True)
         return self._bk
 
     def _apply_efficiency(self, lines):
@@ -577,6 +630,32 @@ class Session:
             lines = self.db.line_list(Z, sh)
             if not lines:
                 continue
+            # M shell: one component per subshell, with the full transition
+            # list from xraylib, when the table's five lines will not do.
+            # The subshell populations are then fitted rather than assumed -
+            # the same treatment GeoPIXE gives L1, L2 and L3.
+            if sh == 3 and self.options.split_m_subshells:
+                subs = self.db.m_subshell_lines(Z)
+                if subs:
+                    for sub in ('M5', 'M4', 'Mz', 'M3', 'M2', 'M1'):
+                        ll = subs.get(sub)
+                        if not ll:
+                            continue
+                        ll = self._apply_efficiency(ll)
+                        o = self.options
+                        if not any(o.e_low <= e <= o.e_high
+                                   for e, i in ll if i > 0.01):
+                            continue
+                        c = _fit.Component(self.db.sym[Z] + sub, ll,
+                                           escape=self.escape_model)
+                        if self._tail_fns is not None:
+                            c.tail_amp_fn, c.tail_len_fn = self._tail_fns
+                        else:
+                            c.tail_amp_fn = lambda E, a=o.tail_amp: a
+                            c.tail_len_fn = lambda E, l=o.tail_len: l
+                        out.append(c)
+                        meta.append((Z, sh))
+                    continue
             lines = self._apply_efficiency(lines)
             # A component whose lines all sit outside the fit range has no
             # data to constrain it. Its design column is ~zero inside the

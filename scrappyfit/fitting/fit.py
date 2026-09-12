@@ -579,5 +579,12 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
                                               pars, channels, nonneg=nonneg)
     model = A @ np.maximum(areas, 0.0) + background
     names = [c.name for c in components]
+    # When the background was fitted as a component the 'background' array
+    # here is the zeros it was replaced with. Report the FITTED background -
+    # amplitude times shape - so plots and downstream code see the curve the
+    # model actually used, not an empty line.
+    if fitted_bg is not None:
+        k = components.index(fitted_bg)
+        background = A[:, k] * max(float(areas[k]), 0.0)
     return FitResult(areas, errors, names, chi2, ndf, model, background,
                      pars, A)
