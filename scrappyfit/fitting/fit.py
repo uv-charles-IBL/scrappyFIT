@@ -409,7 +409,8 @@ def _linear_step_free(counts, background, components, pars, channels,
 def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
                  noise, fano, tail_amp=0.0, tail_len=0.0,
                  background=None, refine=('cal', 'width'), max_iter=12,
-                 verbose=False, nonneg=True, fit_background=True):
+                 verbose=False, nonneg=True, fit_background=True,
+                 start_pars=None):
     """Fit a PIXE spectrum.
 
     counts            spectrum
@@ -452,6 +453,11 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
     pars = ShapePars(noise, fano, ch_at_eoc, 1.0 / cal_a,
                      tail_amp=tail_amp, tail_len=tail_len,
                      e_low=e_low, e_high=e_high)
+    if start_pars is not None:
+        # Continue from a converged set - the sum-peak passes only need the
+        # areas re-solved against updated sum lines, not a fresh search.
+        pars.a = np.array(start_pars.a, dtype=float)
+        refine = ()
 
     # Seed the tail parameters away from the alpha_zero zero-crossing.
     #
@@ -516,28 +522,56 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
     for g in refine:
         active.extend(groups.get(g, []))
 
-    steps = {i: s for i, s in active}
-    for _ in range(max_iter):
-        improved = False
-        for idx, _ in active:
-            for sign in (+1, -1):
-                trial = ShapePars(pars.a[0], pars.a[1], pars.a[2], pars.a[3],
-                                  pars.a[5], pars.a[6], e_low, e_high)
-                trial.a = pars.a.copy()
-                trial.a[idx] += sign * steps[idx]
-                if idx in (8, 9, 11, 12, 13, 14) and trial.a[idx] < 0.0:
-                    continue
-                c2 = chi2_of(trial)
-                if c2 < best - 1e-6:
-                    best = c2
-                    pars = trial
-                    improved = True
-                    break
-        if not improved:
-            for i in steps:
-                steps[i] *= 0.5
-            if max(steps.values()) < 1e-7:
-                break
+    # Levenberg-Marquardt on the non-linear parameters, with the linear
+    # areas re-solved inside every residual evaluation (variable projection).
+    #
+    # This replaces a coordinate descent that stepped one parameter at a time
+    # and halved the step on failure. That cannot follow a valley: noise and
+    # Fano are strongly correlated - FWHM^2 = noise^2 + fano^2 (E - e_low) -
+    # so moving one alone always looks worse and the search stalls wherever
+    # it started. On run 380001 it converged to chi2 53.6 from the detector
+    # file's widths and 43.3 from a different seed, which is the signature.
+    #
+    # GeoPIXE's pixe.pro fits the same parameters by Marquardt with analytic
+    # derivatives. scipy's trust-region LM with a numerical Jacobian is the
+    # same idea and, for a handful of parameters, costs nothing.
+    idxs = [i for i, _ in active]
+    if idxs:
+        from scipy.optimize import least_squares
+        lower = [(0.0 if i in (8, 9, 11, 12, 13, 14) else -np.inf)
+                 for i in idxs]
+        x0 = np.array([pars.a[i] for i in idxs], dtype=float)
+        # scale each parameter so a unit step is a sensible move in it
+        scale = np.array([max(abs(st), 1e-6) for _, st in active])
+
+        def resid(x):
+            trial = ShapePars(pars.a[0], pars.a[1], pars.a[2], pars.a[3],
+                              pars.a[5], pars.a[6], e_low, e_high)
+            trial.a = pars.a.copy()
+            for i, v in zip(idxs, x):
+                trial.a[i] = v
+            # Unconstrained solve here: the non-linear parameters are set by
+            # the strong peaks, which NNLS never clips, and NNLS costs ten
+            # times as much per evaluation. The final areas are re-solved
+            # with the caller's nonneg setting after the optimiser returns.
+            ar, _, _, _, A = linear_step(counts, background, components,
+                                         trial, channels, nonneg=True)
+            m = A[channels] @ np.maximum(ar, 0.0) + background[channels]
+            return (counts[channels] - m) / np.sqrt(np.maximum(m, 1.0))
+
+        try:
+            sol = least_squares(resid, x0, bounds=(lower, np.inf),
+                                x_scale=scale, method='trf',
+                                max_nfev=12 * max(len(idxs), 1),
+                                ftol=1e-5, xtol=1e-5)
+            c2 = float(np.sum(sol.fun ** 2))
+            if c2 < best:
+                best = c2
+                for i, v in zip(idxs, sol.x):
+                    pars.a[i] = float(v)
+        except Exception as ex:
+            if verbose:
+                print('  least_squares failed (%s); keeping the start' % ex)
     if verbose:
         print('  final chi2 = %.1f' % best)
 

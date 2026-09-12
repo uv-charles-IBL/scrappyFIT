@@ -619,12 +619,13 @@ class Session:
                 max_area=self.pileup_cap())
             comps = comps + [sump]
 
-        def go():
+        def go(start=None):
             return _fit.fit_spectrum(
                 self.spectrum, a, b, comps, o.e_low, o.e_high,
                 noise=o.noise, fano=o.fano, tail_amp=o.tail_amp,
                 tail_len=o.tail_len, background=self.background,
-                refine=o.refine_groups(), nonneg=o.nonneg)
+                refine=o.refine_groups(), nonneg=o.nonneg,
+                start_pars=start)
 
         res = go()
         if sump is not None:
@@ -638,7 +639,7 @@ class Session:
                 got = dict(zip(res.names, res.areas))
                 if not sump.update(got, amplitude=got.get('pileup')):
                     break
-                res = go()
+                res = go(start=res.pars)
         self._fit = res
         return self._fit
 
