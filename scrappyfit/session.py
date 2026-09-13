@@ -118,6 +118,10 @@ class FitOptions:
         # invent an element. On quartz the Si+O sum at 2.24 keV is 488 counts
         # and gets assigned to mercury or niobium if it is not modelled.
         self.use_pileup = True
+        self.subthreshold_pileup_kev = 0.0
+        """Width in keV of the sub-threshold partner distribution for
+        SubThresholdPileupComponent; 0 disables it. Set to about 0.35 for a
+        spectrum taken with the DPP fast channel not triggering."""
         self.sum_deficit = 0.1
         """Fraction of sum-peak amplitude lost to finite time resolution.
 
@@ -748,6 +752,12 @@ class Session:
                 max_area=self.pileup_cap())
             comps = comps + [sump]
 
+        subp = None
+        if getattr(o, 'subthreshold_pileup_kev', 0.0) > 0:
+            subp = _fit.SubThresholdPileupComponent(
+                [c for c in comps if c is not sump], o.subthreshold_pileup_kev)
+            comps = comps + [subp]
+
         def go(start=None):
             return _fit.fit_spectrum(
                 self.spectrum, a, b, comps, o.e_low, o.e_high,
@@ -757,6 +767,10 @@ class Session:
                 start_pars=start)
 
         res = go()
+        if subp is not None:
+            got = dict(zip(res.names, res.areas))
+            subp.update(got, res.pars, len(self.spectrum), a)
+            res = go(start=res.pars)
         if sump is not None:
             # Sum-line intensities are products of the parent AREAS, which are
             # not known until the elements have been fitted once. sum_peaks.pro

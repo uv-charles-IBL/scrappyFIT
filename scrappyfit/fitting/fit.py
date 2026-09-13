@@ -286,6 +286,55 @@ class SumPeakComponent:
         return f / t if t > 0 else f
 
 
+class SubThresholdPileupComponent:
+    """Pile-up of every line with a pulse too small to be seen.
+
+    When the DPP's fast channel is not triggering (a fast threshold set far
+    too high, as on the 12 Sep 2026 MnOx run where it counted 2,573 events
+    against 1.66 M), nothing is rejected and every X-ray that lands within
+    the slow shaping time of a small pulse - electronic noise, the
+    sub-threshold tail of the low energy continuum - is recorded at its own
+    energy plus that of the partner. The result is a shoulder on the high
+    side of every strong line, 0 to a few hundred eV wide, which no sum-peak
+    list can make because the partners are below the MCA threshold.
+
+    The partner distribution is taken flat from 0 to `width_kev`; the shape
+    of the component is the line model convolved with that box, and its
+    amplitude is fitted. It is one number, and it exists to keep the fit from
+    pushing that shoulder into iron or the Mn Kbeta tail. Rebuilt from the
+    current areas between passes, like SumPeakComponent.
+    """
+    name = 'subthreshold pileup'
+
+    def __init__(self, components, width_kev=0.35):
+        self._src = list(components)
+        self.width_kev = float(width_kev)
+        self._shape = None
+        self.tail_amp_fn = lambda E: 0.0
+        self.tail_len_fn = lambda E: 0.0
+
+    def update(self, areas, pars, n_channels, cal_a):
+        m = np.zeros(n_channels)
+        for c in self._src:
+            a = areas.get(getattr(c, 'name', None), 0.0)
+            if a > 0:
+                m += a * c.profile(pars, n_channels)
+        if m.sum() <= 0:
+            self._shape = None
+            return 0
+        k = max(int(round(self.width_kev / cal_a)), 1)
+        box = np.ones(k) / k
+        conv = np.convolve(m, box)[:n_channels]
+        t = conv.sum()
+        self._shape = conv / t if t > 0 else None
+        return 1
+
+    def profile(self, pars, n_channels):
+        if self._shape is None or len(self._shape) != n_channels:
+            return np.zeros(n_channels)
+        return self._shape
+
+
 class FitResult:
     def __init__(self, areas, errors, names, chi2, ndf, model, background,
                  pars, profiles):
