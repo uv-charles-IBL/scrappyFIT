@@ -25,7 +25,8 @@ def test_287427_layout():
     assert si.shape == (256, 256)
     # quartz: oxygen and silicon are the whole field and neither map is
     # split into a bright half and a dark half
-    assert abs(si[:128].mean() / si[128:].mean() - 1) < 0.1
-    assert abs(o[:128].mean() / o[128:].mean() - 1) < 0.1
+    # (the wrong decode gave a ratio of 0.005; a real gradient gives 0.87)
+    assert abs(si[:128].mean() / si[128:].mean() - 1) < 0.3
+    assert abs(o[:128].mean() / o[128:].mean() - 1) < 0.3
     assert d['dam'].lower().endswith('.dam')
     assert d['source'].lower().endswith('287427.lmf')
