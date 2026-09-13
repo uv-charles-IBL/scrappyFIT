@@ -234,6 +234,8 @@ class Session:
         self.mask = None
         self.mask_name = ''
         self.dam = None
+        self._live_s = None
+        self.mca_info = None
         self.invalidate()
 
     # -- detector efficiency --------------------------------------------
@@ -303,6 +305,13 @@ class Session:
             self._load_dam(p)
         elif ext == '.spec':
             self._load_spec_any(p)
+        elif ext == '.mca':
+            from .io import amptek as _am
+            counts, info = _am.read_mca(p)
+            self.spectrum = np.asarray(counts, dtype=float)
+            self.events = None
+            self.mca_info = info
+            self._live_s = info.get('live_s')
         else:
             self._load_columns(p)
         self.full_spectrum = (None if self.spectrum is None
@@ -974,6 +983,8 @@ class Session:
     def live_seconds(self):
         """Acquisition duration in seconds, from the LMF clocks. None if the
         file does not carry them - and then the pile-up cap cannot be set."""
+        if getattr(self, '_live_s', None):
+            return float(self._live_s)
         if not self.path or not str(self.path).lower().endswith('.lmf'):
             return None
         try:
