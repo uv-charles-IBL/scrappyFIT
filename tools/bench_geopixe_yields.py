@@ -60,7 +60,7 @@ def bench_one(path, db, mac='henke1993', fy='krause'):
         row = row[None, :]
     zk = [int(z) for z in z2[sh == 1]]
 
-    stack = [Layer(list(L['Z']), list(L['F']), float(L['thick']),
+    stack = [Layer(list(L['Z']), list(L['W']), float(L['thick']),
                    'layer%d' % i) for i, L in enumerate(y0['layers'])]
     lym = LayeredYieldModel(db)
     E0 = y0['e_beam']

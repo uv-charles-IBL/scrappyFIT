@@ -39,7 +39,7 @@ for f in sorted(files):
     row = np.asarray(y0['yield'])
     row = row[0] if row.ndim == 2 else row
     zk = [int(z) for z in z2[sh == 1]]
-    stack = [Layer(list(L['Z']), list(L['F']), float(L['thick']), 'L%d' % i)
+    stack = [Layer(list(L['Z']), list(L['W']), float(L['thick']), 'L%d' % i)
              for i, L in enumerate(y0['layers'])]
     lym = LayeredYieldModel(db)
     try:

@@ -61,6 +61,22 @@ class _R:
         return [self.s() for _ in range(n)]
 
 
+_ATOMIC_MASS = None
+
+
+def _mass_fractions(zlist, atom_frac):
+    """Atom fractions to weight fractions, with the database's masses."""
+    global _ATOMIC_MASS
+    if not zlist:
+        return []
+    if _ATOMIC_MASS is None:
+        from ..physics.gpdb import Database
+        _ATOMIC_MASS = Database().A
+    m = [_ATOMIC_MASS[z] * f for z, f in zip(zlist, atom_frac)]
+    t = sum(m)
+    return [x / t for x in m] if t > 0 else list(atom_frac)
+
+
 def read_yield(path):
     r = _R(open(path, 'rb').read())
     version = r.i4()
@@ -78,7 +94,15 @@ def read_yield(path):
             N = r.i4()
             Z = r.i4(32); Frac = r.f4(32)
             thick = r.f4(); name = r.s()
-            layers.append(dict(N=N, Z=list(Z[:max(N, 0)]), F=list(Frac[:max(N, 0)]),
+            # F is the ATOM fraction of each element in the layer - SiO2 is
+            # stored as O 0.667, Si 0.333, and the kimberlite carries H at
+            # 0.173. Handing these to a stopping-power or absorption
+            # routine as weight fractions makes hydrogen 17% of the mass
+            # of a rock and cost every thick-target yield 24%. 'W' is the
+            # weight fraction, which is what Layer() wants.
+            Zl = [int(z) for z in Z[:max(N, 0)]]
+            Fl = [float(f) for f in Frac[:max(N, 0)]]
+            layers.append(dict(N=N, Z=Zl, F=Fl, W=_mass_fractions(Zl, Fl),
                                thick=thick, name=name))
         d['layers'] = layers
         d['unknown'] = r.i4(); d['e_beam'] = r.f4()

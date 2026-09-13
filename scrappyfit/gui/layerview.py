@@ -170,7 +170,7 @@ class LayerStackDialog(QtWidgets.QDialog):
                 thick=(Y.get('thick') or [L['thick']])[i],
                 density=(Y.get('density') or [0])[i],
                 microns=(Y.get('microns') or [0])[i],
-                zlist=L['Z'], wfrac=L['F']))
+                zlist=L['Z'], wfrac=L.get('W', L['F'])))
         self.layers = layers
         self.selected = 0
         self.ed_theta.setText('%.0f' % Y.get('theta', 135.0))
