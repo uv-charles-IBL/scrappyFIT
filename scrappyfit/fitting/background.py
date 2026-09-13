@@ -159,7 +159,7 @@ def boost_correction(E, eff=None, filter_trans=None, sample_trans=None,
 
 def snip(counts, cal_a, cal_b, elow, ehigh, passes=8, def_passes=None,
          w0=None, w1=None, curve=CURVE_DEFAULT, hybrid=True,
-         e_trans=None, use_low_stats=True, trans=None):
+         e_trans=None, use_low_stats=True, trans=None, trim_seb=False):
     """Return the SNIP background for a spectrum.
 
     counts        spectrum, counts per channel
@@ -170,8 +170,19 @@ def snip(counts, cal_a, cal_b, elow, ehigh, passes=8, def_passes=None,
     w0, w1        peak width model, FWHM^2 = w0 + w1*E (keV^2)
     hybrid        more passes at high energy, as GeoPIXE does by default
     e_trans       transition energy for the hybrid split. GeoPIXE derives this
-                  from the filter inflection ('e_inflection'); with no filter,
-                  pass it explicitly or leave None to strip in one range.
+                  from the filter inflection ('e_inflection'); with no filter
+                  that function returns 6 keV, so pass 6.0 to match it.
+    trim_seb      GeoPIXE's 'Trim SEB' option (trim_seb in strip_clip.pro).
+                  The secondary electron bremsstrahlung hump near 2.5 keV is
+                  broader than the clip width but still gets eaten by the
+                  strip. GeoPIXE divides the spectrum by
+                  1 - 0.7 exp(-((E - 2.5)/1.5)^2) before stripping and
+                  multiplies the result back, so the hump survives as
+                  background. On run 354016 the operator had it on: with it
+                  GeoPIXE's SNIP keeps 21,900 counts under 2 to 3 keV, and
+                  without it the port kept 7,400 and the fit then scaled the
+                  whole background by 1.7 to compensate, over-reading the
+                  continuum above 5 keV by that factor.
     """
     if w1 is None:
         w1 = W1_DEFAULT
@@ -204,6 +215,13 @@ def snip(counts, cal_a, cal_b, elow, ehigh, passes=8, def_passes=None,
     if use_low_stats:
         AF, BF = af_bf(w0, w1, cal_a, cal_b)
         t = low_stats_filter(t, low, high, AF, BF)
+
+    seb = None
+    if trim_seb:
+        xs = np.arange(low, high + 1)
+        e1 = (cal_a * xs + cal_b - 2.5) / 1.5
+        seb = 1.0 - 0.7 * np.exp(-e1 * e1)
+        t[low:high + 1] = t[low:high + 1] / seb
 
     xmin = _extend_ends(t, low, high)
 
@@ -244,4 +262,7 @@ def snip(counts, cal_a, cal_b, elow, ehigh, passes=8, def_passes=None,
     back = np.exp(np.exp(t) - 1.0) - 1.0
     if trans is not None:
         back = back * trans
-    return np.maximum(back, 0.1)
+    back = np.maximum(back, 0.1)
+    if seb is not None:
+        back[low:high + 1] = back[low:high + 1] * seb
+    return back

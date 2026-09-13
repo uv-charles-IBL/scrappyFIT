@@ -90,10 +90,19 @@ class FitOptions:
         the full xraylib transition list, instead of the table's five lines.
         See Database.m_subshell_lines for why. Needs xraylib; falls back to
         the table when it is absent."""
-        self.snip_passes = 3
-        self.snip_passes_geopixe = True
-        """Use strip_clip.pro's pass count (8, or 4 when boosted) rather
-        than snip_passes. Set False to control the count by hand."""
+        self.snip_passes = 8
+        """SNIP passes, GeoPIXE's default. The operator lowers it to keep a
+        broad continuum hump as background: on run 354016 GeoPIXE's exported
+        SNIP corresponds to about 2 passes at the detector width."""
+        self.snip_boost = False
+        """strip_clip.pro's 'boost' - divide by the transmission before
+        stripping, halve the passes, multiply back. Off by default in
+        GeoPIXE and here."""
+        self.snip_trim_seb = False
+        """strip_clip.pro's 'Trim SEB' option; see background.snip."""
+        self.snip_e_trans = None
+        """Hybrid split energy (keV): passes below it, double above. None
+        follows e_inflection.pro, which returns 6 keV with no filter."""
         self.mac = 'mixed'
         self.fluor_yield = 'krause'
         self.fluor_elam_zmax = 10
@@ -566,7 +575,7 @@ class Session:
             E = a * np.arange(n) + b
 
             trans = None
-            if self.efficiency is not None:
+            if self.efficiency is not None and o.snip_boost:
                 from .fitting.background import boost_correction
                 try:
                     eff = np.array([self.efficiency(max(e, 0.05)) for e in E])
@@ -582,12 +591,29 @@ class Session:
             if det and det.get('w0') and det.get('w1'):
                 w0, w1 = float(det['w0']), float(det['w1'])
 
-            passes = o.snip_passes
-            if getattr(o, 'snip_passes_geopixe', True):
-                passes = 8 if trans is None else 4
+            passes = int(o.snip_passes)
+            if trans is not None:
+                passes = max(passes // 2, 1)
+            e_trans = o.snip_e_trans
+            if e_trans is None:
+                # e_inflection.pro: first of 6, 8, ... 16 keV where the
+                # filter transmits more than 15 %; 6 keV with no filter
+                e_trans = 6.0
+                ext = (self.detector or {}).get('external') or []
+                if ext:
+                    for e in (6.0, 8.0, 10.0, 12.0, 14.0, 16.0):
+                        e_trans = e
+                        tr = 1.0
+                        for lay in ext:
+                            mu = self.db.mu_compound(lay['Z'], lay['F'], e,
+                                                     o.mac) or 0.0
+                            tr *= np.exp(-mu * lay['thick'] * 1e-3)
+                        if tr > 0.15:
+                            break
 
             self._bk = snip(self.spectrum, a, b, o.e_low, o.e_high,
                             passes=passes, w0=w0, w1=w1, trans=trans,
+                            e_trans=e_trans, trim_seb=o.snip_trim_seb,
                             use_low_stats=True)
         return self._bk
 
