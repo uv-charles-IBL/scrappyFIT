@@ -47,9 +47,17 @@ class Component:
         self.tail_amp_fn = tail_amp_fn
         self.tail_len_fn = tail_len_fn
         self.beta_tail = beta_tail
+        # an EmpiricalResponse (fitting.hypermet) replaces GeoPIXE's Gaussian +
+        # exponential tail when set; None keeps line.pro's shape
+        self.response = None
 
     def profile(self, pars, n_channels, do_tail=True):
         f = np.zeros(n_channels)
+        if self.response is not None:
+            from .hypermet import line_profile as _hyp
+            for E, beta in self.lines:
+                f += _hyp(E, beta, pars, n_channels, self.response)
+            return f
         for E, beta in self.lines:
             ta = self.tail_amp_fn(E) if self.tail_amp_fn else 0.0
             tl = self.tail_len_fn(E) if self.tail_len_fn else 0.0
@@ -558,7 +566,7 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
                  noise, fano, tail_amp=0.0, tail_len=0.0,
                  background=None, refine=('cal', 'width'), max_iter=12,
                  verbose=False, nonneg=True, fit_background=True,
-                 start_pars=None):
+                 start_pars=None, refine_from_start=False):
     """Fit a PIXE spectrum.
 
     counts            spectrum
@@ -605,7 +613,8 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
         # Continue from a converged set - the sum-peak passes only need the
         # areas re-solved against updated sum lines, not a fresh search.
         pars.a = np.array(start_pars.a, dtype=float)
-        refine = ()
+        if not refine_from_start:
+            refine = ()
 
     # Seed the tail parameters away from the alpha_zero zero-crossing.
     #
@@ -725,7 +734,17 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
                                 x_scale=scale, method='trf',
                                 max_nfev=12 * max(len(idxs), 1),
                                 ftol=1e-5, xtol=1e-5)
-            c2 = float(np.sum(sol.fun ** 2))
+            # Score the proposal with the SAME chi2 as the start. The LM
+            # objective (unconstrained solve, negatives clipped) is a proxy;
+            # comparing it against chi2_of - a strict NNLS chi2 - accepted
+            # steps that lowered the proxy and raised the real chi2. With
+            # correlated components (free Kb, the Al artefact) the two part
+            # company: on run 403001 that walked the gain 3.7 % off and doubled
+            # the reported chi2.
+            cand = _copy.deepcopy(pars)
+            for i, v in zip(idxs, sol.x):
+                cand.a[i] = float(v)
+            c2 = chi2_of(cand)
             if c2 < best:
                 best = c2
                 for i, v in zip(idxs, sol.x):

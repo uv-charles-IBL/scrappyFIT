@@ -74,6 +74,34 @@ M_SUBSHELL_PRIOR = {'M5': 0.555, 'M4': 0.385, 'Mz': 0.0065,
                     'M3': 0.0375, 'M2': 0.014, 'M1': 0.002}
 
 
+def _kbeta_free(o, Z, sym):
+    """free_kbeta is True (every element from free_kbeta_zmin up), False, or a
+    set of symbols / Z. Use a set naming the MAJOR elements: a minor element's
+    Kb is not determined by its own counts, and freeing it lets the fit trade
+    it against a neighbour (Fe Ka under Mn Kb)."""
+    f = o.free_kbeta
+    if f is True:
+        return Z >= o.free_kbeta_zmin
+    if not f:
+        return False
+    names = {str(x).lower() for x in f}
+    return sym.lower() in names or str(Z) in names
+
+
+def _split_kbeta(lines):
+    """Split a K line list into (Ka lines, Kb lines) at the midpoint between the
+    strongest line and the strongest line more than 50 eV above it."""
+    if len(lines) < 2:
+        return lines, []
+    ea = max(lines, key=lambda t: t[1])[0]
+    up = [t for t in lines if t[0] > ea + 0.05]
+    if not up:
+        return lines, []
+    eb = max(up, key=lambda t: t[1])[0]
+    cut = 0.5 * (ea + eb)
+    return [t for t in lines if t[0] <= cut], [t for t in lines if t[0] > cut]
+
+
 class FitOptions:
     """Everything that changes a fit result, in one place so it can be saved
     beside the numbers. A result without its options is not reproducible."""
@@ -158,10 +186,32 @@ class FitOptions:
         self.nonneg = 'strict'
         self.refine = ('cal', 'width', 'tail')
         self.fix_mn_lb = True
+        # 'detector'  GeoPIXE's line.pro shape: Gaussian + one exponential tail
+        #             from the .detector file, plus this package's optional shelves
+        # 'empirical' Hypermet shape with parameters measured on single-line
+        #             standards (fitting.hypermet); load with Session.load_response
+        self.response_model = 'detector'
+        # Fit Kb separately from Ka: True for every Z >= free_kbeta_zmin, or a
+        # set of element symbols (recommended: the major elements). The atomic Kb/Ka of
+        # the line table is a free-atom value; in compounds it moves (Cl in NaCl
+        # +30 %, Mn in oxides +9 %, Si +50 % measured on 2026-09-23), and a fixed
+        # ratio makes the fit borrow a neighbouring element to fill the gap.
+        self.free_kbeta = False
+        self.free_kbeta_zmin = 14
+        self.response_scale = False
+        # width of the Kb/Ka prior as a fraction of the pair's counts: a
+        # departure of this much from the table ratio costs one sigma
+        self.kbeta_prior_strength = 0.15
         self.__dict__.update(kw)
 
     def refine_groups(self):
         g = list(self.refine)
+        if self.response_model == 'empirical':
+            # the measured response fixes the tail and shelf shape; cal and width
+            # float, and with response_scale the tail and shelf AMOUNTS may be
+            # scaled per spectrum (a5, a6), as line.pro's tail is
+            keep = ('cal', 'width', 'tail') if self.response_scale else ('cal', 'width')
+            return tuple(x for x in g if x in keep)
         for flag, name in ((self.use_escape_step, 'shelf'),
                            (self.use_contact_step, 'contact'),
                            (self.use_window_step, 'window')):
@@ -185,6 +235,7 @@ class Session:
         self.geometry = Geometry()
         self.detector = None        # a GeoPIXE .detector model, if loaded
         self._tail_fns = None       # its energy-dependent tail functions
+        self.response = None        # fitting.hypermet.EmpiricalResponse, if loaded
         self._escape = None
         self.reset_data()
 
@@ -376,6 +427,19 @@ class Session:
         self._escape = None
         self.invalidate()
         return det
+
+    def load_response(self, path_or_response):
+        """Adopt a measured detector response (fitting.hypermet) and switch the
+        line shape to it. Accepts a JSON path or an EmpiricalResponse."""
+        from .fitting.hypermet import EmpiricalResponse
+        r = (path_or_response if isinstance(path_or_response, EmpiricalResponse)
+             else EmpiricalResponse.load(str(path_or_response)))
+        mac = self.options.mac
+        r.mu_al = lambda E, db=self.db: db.mu_compound([13], [1.0], float(E), mac) or 0.0
+        self.response = r
+        self.options.response_model = 'empirical'
+        self.invalidate()
+        return r
 
     def load_filter(self, path):
         """Add a GeoPIXE .filter to the absorbers in front of the crystal."""
@@ -719,6 +783,33 @@ class Session:
             o = self.options
             if not any(o.e_low <= e <= o.e_high for e, i in lines if i > 0.01):
                 continue
+            if sh == 1 and _kbeta_free(o, Z, self.db.sym[Z]):
+                ka, kb = _split_kbeta(lines)
+                if ka and kb and any(o.e_low <= e <= o.e_high for e, i in kb):
+                    # intensities are NOT renormalised, so the Ka component's
+                    # area keeps its meaning for quantify() and Kb/Ka is simply
+                    # area(Kb) / area(Ka) x table ratio
+                    cb = _fit.Component(self.db.sym[Z] + 'Kb', kb,
+                                        escape=self.escape_model)
+                    self._attach_shape(cb)
+                    # Soft prior toward the table ratio (equal areas in these
+                    # unnormalised units). A free Kb on a WEAK element removes
+                    # the only thing separating it from a neighbour's Kb - Fe Ka
+                    # sits 86 eV from Mn Kb, and with Fe Kb free the fit put
+                    # 17 k counts of Fe under Mn Kb with no Fe Kb at all. With
+                    # the prior a strong line's data override it and a weak
+                    # line's Kb stays near the table.
+                    grp = self.db.sym[Z] + 'K'
+                    cb.prior_group, cb.prior_fraction = grp, 0.5
+                    _fit.PRIOR_STRENGTH[grp] = o.kbeta_prior_strength
+                    out.append(cb)
+                    meta.append((Z, 'Kb'))
+                    lines = ka
+                    kb_group = grp
+                else:
+                    kb_group = None
+            else:
+                kb_group = None
             c = _fit.Component(self.db.sym[Z] + SHELL_SUFFIX[sh], lines,
                                escape=self.escape_model)
             if sh == 2 and 21 <= Z <= 30:
@@ -734,10 +825,27 @@ class Session:
                 # physics/dettail - but it is honest about being one.
                 c.tail_amp_fn = lambda E, a=self.options.tail_amp: a
                 c.tail_len_fn = lambda E, l=self.options.tail_len: l
+            if self.response is not None and o.response_model == 'empirical':
+                c.response = self.response
+            if kb_group:
+                c.prior_group, c.prior_fraction = kb_group, 0.5
             out.append(c)
             meta.append((Z, sh))
+        if self.response is not None and self.options.response_model == 'empirical':
+            for c in out:
+                c.response = self.response
         self._meta = meta
         return out
+
+    def _attach_shape(self, c):
+        """Tail functions for a component built outside the main loop."""
+        if self._tail_fns is not None:
+            c.tail_amp_fn, c.tail_len_fn = self._tail_fns
+        else:
+            c.tail_amp_fn = lambda E, a=self.options.tail_amp: a
+            c.tail_len_fn = lambda E, l=self.options.tail_len: l
+        if self.response is not None and self.options.response_model == 'empirical':
+            c.response = self.response
 
     def run_fit(self, elements):
         o = self.options
@@ -758,13 +866,13 @@ class Session:
                 [c for c in comps if c is not sump], o.subthreshold_pileup_kev)
             comps = comps + [subp]
 
-        def go(start=None):
+        def go(start=None, refine_again=False):
             return _fit.fit_spectrum(
                 self.spectrum, a, b, comps, o.e_low, o.e_high,
                 noise=o.noise, fano=o.fano, tail_amp=o.tail_amp,
                 tail_len=o.tail_len, background=self.background,
                 refine=o.refine_groups(), nonneg=o.nonneg,
-                start_pars=start)
+                start_pars=start, refine_from_start=refine_again)
 
         res = go()
         if subp is not None:
@@ -783,6 +891,19 @@ class Session:
                 if not sump.update(got, amplitude=got.get('pileup')):
                     break
                 res = go(start=res.pars)
+        if sump is not None or subp is not None:
+            # The first pass refined calibration and width with the pile-up
+            # terms still empty, so the non-linear parameters absorbed the sum
+            # peaks: on 403001 the gain moved 3.7 % to cover the Si+Si sum at
+            # 3.48 keV with Ti and Au lines. Refine once more now that the
+            # pile-up lines exist, then rebuild them from the final areas.
+            res = go(start=res.pars, refine_again=True)
+            got = dict(zip(res.names, res.areas))
+            if subp is not None:
+                subp.update(got, res.pars, len(self.spectrum), a)
+            if sump is not None:
+                sump.update(got, amplitude=got.get('pileup'))
+            res = go(start=res.pars)
         self._fit = res
         return self._fit
 
