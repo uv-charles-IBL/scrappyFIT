@@ -209,6 +209,12 @@ class FitOptions:
         # add a second plateau rising toward the sum. Better on 403001/006,
         # but it destabilised 403004 and 403005 - off until that is understood
         self.pileup_ramp = False
+        # DPP fast-channel threshold as an energy, keV. When set: sub-threshold
+        # pile-up uses the measured spectrum below it as the partner
+        # distribution, and sum peaks / plateau keep only pairs above it.
+        # Amptek THFA is in fast-channel units; its energy depends on gain and
+        # TPFA, so fit it (scan) rather than convert.
+        self.fast_threshold_kev = None
         # width of the Kb/Ka prior as a fraction of the pair's counts: a
         # departure of this much from the table ratio costs one sigma
         self.kbeta_prior_strength = 0.15
@@ -869,7 +875,7 @@ class Session:
         if o.use_pileup:
             sump = _fit.SumPeakComponent(
                 comps, sum_deficit=o.sum_deficit, e_high=o.e_high,
-                max_area=self.pileup_cap())
+                max_area=self.pileup_cap(), e_min=o.fast_threshold_kev)
             comps = comps + [sump]
             if o.use_pileup_plateau:
                 comps = comps + [_fit.PileupPlateauComponent(sump, 'flat')]
@@ -877,9 +883,12 @@ class Session:
                     comps = comps + [_fit.PileupPlateauComponent(sump, 'ramp')]
 
         subp = None
-        if getattr(o, 'subthreshold_pileup_kev', 0.0) > 0:
+        if getattr(o, 'subthreshold_pileup_kev', 0.0) > 0 or o.fast_threshold_kev:
+            ft = o.fast_threshold_kev
             subp = _fit.SubThresholdPileupComponent(
-                [c for c in comps if c is not sump], o.subthreshold_pileup_kev)
+                [c for c in comps if c is not sump and not isinstance(c, _fit.PileupPlateauComponent)],
+                ft if ft else o.subthreshold_pileup_kev,
+                spectrum=(self.spectrum if ft else None), cal=(self.cal if ft else None))
             comps = comps + [subp]
 
         def go(start=None, refine_again=False):

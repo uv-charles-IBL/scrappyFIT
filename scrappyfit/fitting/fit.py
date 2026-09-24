@@ -184,7 +184,11 @@ class SumPeakComponent:
     MIN_REL = 0.0003        # sum_peaks.pro: ar > 0.0003 * ar[0]
 
     def __init__(self, components, sum_deficit=0.1, e_high=None,
-                 max_area=None):
+                 max_area=None, e_min=None):
+        """e_min: the fast threshold, keV. Pairs whose smaller line is below it
+        are pile-up with a pulse the rejector cannot see - the sub-threshold
+        component's job - and are left out here so they are not counted twice."""
+        self.e_min = e_min
         self._src = list(components)
         self.sum_deficit = float(sum_deficit)
         self.e_high = e_high
@@ -251,6 +255,8 @@ class SumPeakComponent:
             for j, (wj, ej) in enumerate(dbl):
                 es = shift * (ei + ej)
                 if self.e_high and es > self.e_high:
+                    continue
+                if self.e_min and min(ei, ej) < self.e_min:
                     continue
                 out.append((es, wi * wj / d0))
                 if j >= i:
@@ -384,9 +390,17 @@ class SubThresholdPileupComponent:
     """
     name = 'subthreshold pileup'
 
-    def __init__(self, components, width_kev=0.35):
+    def __init__(self, components, width_kev=0.35, spectrum=None, cal=None):
+        """spectrum, cal: when given, the partner distribution is the MEASURED
+        spectrum below width_kev (the fast threshold) instead of a flat box -
+        a line piles up with the C, N, O and threshold-noise pulses the fast
+        channel cannot see, so Mn Ka + C/N/O lands at 6.18-6.42 keV, in the
+        Ka-Kb valley. The invisible part below the ADC threshold is extended
+        flat at the level of the first visible channels."""
         self._src = list(components)
         self.width_kev = float(width_kev)
+        self._spec = None if spectrum is None else np.asarray(spectrum, float)
+        self._cal = cal
         self._shape = None
         self.tail_amp_fn = lambda E: 0.0
         self.tail_len_fn = lambda E: 0.0
@@ -401,7 +415,33 @@ class SubThresholdPileupComponent:
             self._shape = None
             return 0
         k = max(int(round(self.width_kev / cal_a)), 1)
-        box = np.ones(k) / k
+        if self._spec is not None and self._cal is not None:
+            a0, b0 = self._cal
+            e = a0 * np.arange(len(self._spec)) + b0
+            vis = np.nonzero((self._spec > 0) & (e > 0))[0]
+            box = np.zeros(k)
+            if len(vis):
+                i0 = vis[0] + 3                              # skip the discriminator edge
+                ch0 = int(round((e[i0]) / cal_a))            # its offset in channels from 0 keV
+                lvl = float(np.mean(self._spec[i0:i0 + 20]))
+                for j in range(k):
+                    ej = j * cal_a
+                    if ej < e[i0]:
+                        box[j] = lvl                           # below the ADC threshold: flat
+                    else:
+                        idx = int(round((ej - b0) / a0))
+                        box[j] = self._spec[idx] if 0 <= idx < len(self._spec) else 0.0
+            if box.sum() <= 0:
+                box = np.ones(k)
+            # Partial sums: the partner arrives at a random time within the
+            # shaping interval, so a pulse of energy e adds anywhere from 0 to
+            # e. Kernel K(d) = sum over e >= d of S(e)/e. A flat box is this
+            # kernel for a single partner energy.
+            ee = np.maximum(np.arange(k) * cal_a, cal_a)
+            box = np.cumsum((box / ee)[::-1])[::-1]
+            box = box / box.sum()
+        else:
+            box = np.ones(k) / k
         conv = np.convolve(m, box)[:n_channels]
         t = conv.sum()
         self._shape = conv / t if t > 0 else None

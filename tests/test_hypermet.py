@@ -35,7 +35,7 @@ def test_al_artefact_only_above_al_edge():
 
 def test_tail_jumps_at_si_k_edge():
     r = H.EmpiricalResponse.load(RESP)
-    below, above = r.params(1.83)[0], r.params(1.85)[0]
+    below, above = r.params(1.83)[0], r.params(1.85)[0]   # f_tail
     assert above > 2 * below
 
 

@@ -78,10 +78,12 @@ class EmpiricalResponse:
             ft = _interp_log(E, br['E'], br['f_tail'])
             b = max(_interp_lin(E, br['E'], br['tail_slope_keV']), 1e-3)
             fs = _interp_log(E, br['E'], br['f_shelf'])
+            sl = (max(_interp_lin(E, br['E'], br['shelf_slope_keV']), 0.0)
+                  if br.get('shelf_slope_keV') else 0.0)
             s = ft + fs
             if s > 0.9:                           # keep the Gaussian fraction positive
                 ft, fs = ft * 0.9 / s, fs * 0.9 / s
-            self._memo[key] = (ft, b, fs)
+            self._memo[key] = (ft, b, fs, sl)
         return self._memo[key]
 
     def al_fraction(self, E):
@@ -122,9 +124,18 @@ def tail(x, c, s, b):
     return np.exp(z) * erfc((x - c) / (SQRT2 * s) + s / (SQRT2 * b)) / (2.0 * b)
 
 
-def shelf(x, c, s, c0):
-    """Flat from channel c0 (0 keV) up to the peak, rolled off by the Gaussian;
-    nothing below c0 - a line cannot lose more than all of its charge."""
+def shelf(x, c, s, c0, slope=0.0):
+    """Shelf from channel c0 (0 keV) up to the peak, rolled off by the Gaussian;
+    nothing below c0 - a line cannot lose more than all of its charge.
+
+    slope 0: flat. slope > 0 (channels): rising toward the peak as
+    exp((x - c)/slope) - a long exponential tail. The Mn Ka shelf on 403003 is
+    not flat: it is 2x lower 1.5 keV below the peak than at its foot, which a
+    flat shelf cannot follow (Heirwegh's sloped shelf, the same observation)."""
+    if slope and slope > 0:
+        f = np.where(x >= c0, tail(x, c, s, slope), 0.0)
+        t = f.sum()
+        return f / t if t > 0 else f
     return np.where(x >= c0, erfc((x - c) / (SQRT2 * s)) / (2.0 * max(c - c0, 1.0)), 0.0)
 
 
@@ -138,7 +149,7 @@ def line_profile(E, beta, pars, n_channels, resp, with_artefact=True):
         return f
     w = float(pars.fwhm_channels(E))
     s = w / np.sqrt(KW)
-    ft, b_keV, fs = resp.params(E)
+    ft, b_keV, fs, sl_keV = resp.params(E)
     # Optional per-spectrum scaling of the measured tail and shelf, carried in
     # GeoPIXE's tail parameters a5 and a6 (0 means unscaled). Refined when
     # FitOptions.response_scale is set - the same freedom line.pro's tail has.
@@ -155,7 +166,7 @@ def line_profile(E, beta, pars, n_channels, resp, with_artefact=True):
     hi = min(int(c + 6 * s) + 1, n_channels)
     x = np.arange(lo, hi, dtype=float)
     f[lo:hi] = beta * ((1.0 - ft - fs) * gauss(x, c, s) + ft * tail(x, c, s, b)
-                       + fs * shelf(x, c, s, c0))
+                       + fs * shelf(x, c, s, c0, sl_keV * chpk))
     if with_artefact:
         fa = resp.al_fraction(E)
         if fa > 0:
@@ -163,7 +174,8 @@ def line_profile(E, beta, pars, n_channels, resp, with_artefact=True):
     return f
 
 
-def fit_line(E_axis, counts, lo, hi, E0, neighbours=(), subthr_width=0.5, fix_subthr_width=True):
+def fit_line(E_axis, counts, lo, hi, E0, neighbours=(), subthr_width=0.5, fix_subthr_width=True,
+             sloped_shelf=False):
     """Local Hypermet fit to one isolated line in keV space - the measurement a response
     is built from.
 
@@ -177,10 +189,15 @@ def fit_line(E_axis, counts, lo, hi, E0, neighbours=(), subthr_width=0.5, fix_su
     m = (E_axis >= lo) & (E_axis <= hi)
     xx, yy = E_axis[m], np.asarray(counts, float)[m]
 
-    def hyp(x, A, c, s, ft, b, fs, fp, wp):
+    def hyp(x, A, c, s, ft, b, fs, fp, wp, sl=0.0):
         box = (erfc((c - x) / (SQRT2 * s)) - erfc((c + wp - x) / (SQRT2 * s))) / (2 * wp)
-        return A * ((1 - ft - fs) * gauss(x, c, s) + ft * tail(x, c, s, b)
-                    + fs * erfc((x - c) / (SQRT2 * s)) / 2 / max(c, 1e-3) + fp * box)
+        if sl > 0:
+            # long exponential tail, normalised over 0..inf in keV (area outside
+            # the window still counts toward fs)
+            sh = tail(x, c, s, sl) / max(1.0 - np.exp(-c / sl), 1e-9)
+        else:
+            sh = erfc((x - c) / (SQRT2 * s)) / 2 / max(c, 1e-3)
+        return A * ((1 - ft - fs) * gauss(x, c, s) + ft * tail(x, c, s, b) + fs * sh + fp * box)
 
     nb = list(neighbours)
     A0 = yy.sum() * a
@@ -188,12 +205,16 @@ def fit_line(E_axis, counts, lo, hi, E0, neighbours=(), subthr_width=0.5, fix_su
     p0 = [A0, E0, 0.045, 0.03, 0.03, 0.01, 0.005, subthr_width, max(np.percentile(yy, 5), .1), 0.0]
     lb = [0, E0 - .03, .015, 0, .003, 0, 0, wlo, 0, -np.inf]
     ub = [np.inf, E0 + .03, .12, .6, .5, .3, .1, whi, np.inf, np.inf]
+    ns = 10 + 2 * len(list(neighbours))            # index of the shelf slope, after the neighbours
     for _ in nb:
         p0 += [A0 * .02, 0.0]; lb += [0, -.03]; ub += [np.inf, .03]
+    if sloped_shelf:
+        p0 += [0.8]; lb += [0.05]; ub += [20.0]
 
     def model(p):
         A, c, s, ft, b, fs, fp, wp, b0, b1 = p[:10]
-        f = hyp(xx, A / a, c, s, ft, b, fs, fp, wp) * a + b0 + b1 * (xx - E0)
+        sl = p[ns] if sloped_shelf else 0.0
+        f = hyp(xx, A / a, c, s, ft, b, fs, fp, wp, sl) * a + b0 + b1 * (xx - E0)
         for k, (lab, En) in enumerate(nb):
             sn = s if 'esc' in lab else s * np.sqrt(max(En, .1) / E0)
             f += hyp(xx, p[10 + 2 * k] / a, En + (c - E0) + p[11 + 2 * k], sn, ft, b, 0, fp, wp) * a
@@ -207,6 +228,7 @@ def fit_line(E_axis, counts, lo, hi, E0, neighbours=(), subthr_width=0.5, fix_su
     p = r.x
     return dict(E=E0, centroid=float(p[1]), fwhm_eV=float(2.3548 * p[2] * 1e3), f_tail=float(p[3]),
                 tail_slope_keV=float(p[4]), f_shelf=float(p[5]), f_subthr=float(p[6]),
+                shelf_slope_keV=float(p[ns]) if sloped_shelf else 0.0,
                 chi2=float(np.sum(r.fun ** 2) / max(len(xx) - len(p), 1)),
                 neighbours={lab: dict(area_ratio=float(p[10 + 2 * k] / p[0]), shift_eV=float(p[11 + 2 * k] * 1e3))
                             for k, (lab, En) in enumerate(nb)},
@@ -218,11 +240,11 @@ def build(measurements, al_frac_ref=0.0, name='', source='', edge=SI_K_EDGE):
     by = {}
     for d in measurements:
         by.setdefault(round(d['E'], 3), []).append(d)
-    br = {'below': dict(E=[], f_tail=[], tail_slope_keV=[], f_shelf=[]),
-          'above': dict(E=[], f_tail=[], tail_slope_keV=[], f_shelf=[])}
+    keys = ('f_tail', 'tail_slope_keV', 'f_shelf', 'shelf_slope_keV')
+    br = {'below': {k: [] for k in ('E',) + keys}, 'above': {k: [] for k in ('E',) + keys}}
     for E in sorted(by):
         ds = by[E]; t = br['below' if E < edge else 'above']
         t['E'].append(E)
-        for k in ('f_tail', 'tail_slope_keV', 'f_shelf'):
-            t[k].append(float(np.mean([d[k] for d in ds])))
+        for k in keys:
+            t[k].append(float(np.mean([d.get(k, 0.0) for d in ds])))
     return EmpiricalResponse(br['below'], br['above'], al_frac_ref, 1.7398, name, source, edge)
