@@ -26,7 +26,7 @@ import numpy as np
 
 import copy as _copy
 
-from .peakshape import (P_FANO, P_NOISE, ShapePars,  # noqa: F401
+from .peakshape import (P_FANO, P_NOISE, P_PILEUP, ShapePars,  # noqa: F401
                         line_profile)
 
 
@@ -190,6 +190,8 @@ class SumPeakComponent:
         self.e_high = e_high
         self.max_area = max_area
         self._lines = []                 # [(energy, weight)]
+        self._pairs = []                 # [(e_i, e_j, weight)] for the plateau
+        self.width_factor = 1.0          # 1: sum peak has a line's width at its energy
         self.tail_amp_fn = lambda E: 0.0
         self.tail_len_fn = lambda E: 0.0
 
@@ -237,17 +239,23 @@ class SumPeakComponent:
         top = strong[0][0]
         strong = [t for t in strong if t[0] > self.MIN_REL * top]
 
-        shift = 1.0 - self.sum_deficit / 100.0
+        # energies are stored as raw sums; the deficit is applied in profile()
+        # so that it can be refined (pars.a[4]) without rebuilding the list
+        shift = 1.0
         out = []
 
         dbl = strong[:self.CHECK_DOUBLE]
         d0 = dbl[0][0] * dbl[0][0]
+        pairs = []
         for i, (wi, ei) in enumerate(dbl):
             for j, (wj, ej) in enumerate(dbl):
                 es = shift * (ei + ej)
                 if self.e_high and es > self.e_high:
                     continue
                 out.append((es, wi * wj / d0))
+                if j >= i:
+                    pairs.append((ei, ej, (1.0 if i == j else 2.0) * wi * wj / d0))
+        self._pairs = pairs
 
         # Triples, only once the amplitude is known and large enough to
         # matter - the same gate sum_peaks.pro applies.
@@ -281,15 +289,77 @@ class SumPeakComponent:
         f = np.zeros(n_channels)
         if not self._lines:
             return f
-        # Two independent events add their variances, so a sum peak is
-        # sqrt(2) wider than a line at the same energy. Copy the parameters
-        # and scale the width terms rather than mutating the fit's own.
-        wide = _copy.copy(pars)
-        wide.a = np.array(pars.a, dtype=float)
-        wide.a[P_NOISE] *= np.sqrt(2.0)
-        wide.a[P_FANO] *= np.sqrt(2.0)
+        # Width: the width of an ordinary line AT THE SUM ENERGY, not sqrt(2)
+        # wider. Two photons summed inside one shaping interval are ONE
+        # measurement: the electronic noise enters once and only the Fano
+        # (statistical) term adds, and FWHM^2 = noise^2 + fano^2 (E - e0) is
+        # already additive in E. Measured on 2026-09-23: Si+Si sum FWHM 132 eV
+        # against 130 eV for a line at 3.48 keV, and 155 eV for sqrt(2) x Si Ka.
+        # Deficit: pars.a[4] in percent when refined, else sum_deficit.
+        d = float(pars.a[P_PILEUP]) if pars.a[P_PILEUP] != 0.0 else self.sum_deficit
+        shift = 1.0 - d / 100.0
+        wide = pars
+        if self.width_factor != 1.0:
+            wide = _copy.copy(pars)
+            wide.a = np.array(pars.a, dtype=float)
+            wide.a[P_NOISE] *= self.width_factor
+            wide.a[P_FANO] *= self.width_factor
         for e, w in self._lines:
-            f += line_profile(e, w, wide, n_channels, do_tail=False)
+            f += line_profile(shift * e, w, wide, n_channels, do_tail=False)
+        t = f.sum()
+        return f / t if t > 0 else f
+
+
+class PileupPlateauComponent:
+    """Partial pile-up: two pulses arriving offset in time within the shaping
+    interval are recorded somewhere BETWEEN the larger of the two energies and
+    their sum, not at the sum. Each line pair therefore contributes a flat box
+    from max(E_i, E_j) to E_i + E_j under its sum peak, weighted like the sum
+    peak (product of the parent areas). One free linear amplitude.
+
+    GeoPIXE models the sum peaks only. Without this term the sum-peak energy
+    deficit, when refined, is dragged to 0.5-1.8 % to cover the plateau on the
+    low side of Si+Si, against 0.06-0.4 % measured from the centroid alone
+    (runs 403001-403006).
+    """
+
+    name = 'pileup plateau'
+
+    def __init__(self, sum_component, kind='flat'):
+        """kind 'flat': uniform from max(E_i, E_j) to the sum. 'ramp': rising
+        linearly toward the sum - pulses offset by only a little in time are
+        the likeliest to be caught, so the partial sums crowd toward the full
+        sum. Both are offered as separate linear components; the fit sets the
+        mix (403001 and 403006 need mostly ramp, 403004 mostly flat)."""
+        self._sum = sum_component
+        self.kind = kind
+        if kind != 'flat':
+            self.name = 'pileup ' + kind
+        self.lines = ()
+        self.tail_amp_fn = lambda E: 0.0
+        self.tail_len_fn = lambda E: 0.0
+
+    def profile(self, pars, n_channels):
+        from scipy.special import erfc
+        f = np.zeros(n_channels)
+        pr = getattr(self._sum, '_pairs', None) or []
+        if not pr:
+            return f
+        wmax = max(w for _, _, w in pr)
+        x = np.arange(n_channels, dtype=float)
+        for ei, ej, w in pr:
+            if w < 1e-4 * wmax:
+                continue
+            lo = float(pars.centroid(max(ei, ej)))
+            hi = float(pars.centroid(ei + ej))
+            if hi - lo < 1.0 or hi < 0 or lo > n_channels:
+                continue
+            sg = float(pars.fwhm_channels(ei + ej)) / np.sqrt(8.0 * np.log(2.0))
+            box = (erfc((lo - x) / (np.sqrt(2.0) * sg))
+                   - erfc((hi - x) / (np.sqrt(2.0) * sg))) / (2.0 * (hi - lo))
+            if self.kind == 'ramp':
+                box = box * np.clip((x - lo) / (hi - lo), 0.0, 1.0) * 2.0
+            f += w * box
         t = f.sum()
         return f / t if t > 0 else f
 
@@ -639,6 +709,8 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
             pars.a[13] = 6.0
         if pars.a[14] <= 0.0:
             pars.a[14] = 1.0
+    if 'sumdef' in refine and pars.a[P_PILEUP] == 0.0:
+        pars.a[P_PILEUP] = 0.1          # GeoPIXE's default, percent
     if 'shelf' in refine:
         # seed away from zero, or the search cannot move off the boundary
         if pars.a[8] <= 0.0:
@@ -674,7 +746,9 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
               # Si3N4 window, nitrogen K-edge injection
               'window': [(12, 0.02)],
               # shelf slopes, made energy-dependent rather than fixed
-              'slope': [(13, 0.5), (14, 0.2), (15, 0.2)]}
+              'slope': [(13, 0.5), (14, 0.2), (15, 0.2)],
+              # sum-peak energy deficit, percent (sum_peaks.pro's sum_deficit)
+              'sumdef': [(4, 0.05)]}
     active = []
     for g in refine:
         active.extend(groups.get(g, []))
@@ -696,9 +770,9 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
     if idxs:
         from scipy.optimize import least_squares
         x0 = np.array([pars.a[i] for i in idxs], dtype=float)
-        lower = [(0.0 if i in (8, 9, 11, 12, 13, 14) else -np.inf)
-                 for i in idxs]
-        upper = [np.inf] * len(idxs)
+        lower = [(0.0 if i in (8, 9, 11, 12, 13, 14) else
+                  (1e-4 if i == 4 else -np.inf)) for i in idxs]
+        upper = [(3.0 if i == 4 else np.inf) for i in idxs]
         # The width is a property of the detector, not of the spectrum, so
         # it may only move within a factor of two of where it started (the
         # detector file). Unbounded, a missing element lets the optimiser

@@ -199,6 +199,16 @@ class FitOptions:
         self.free_kbeta = False
         self.free_kbeta_zmin = 14
         self.response_scale = False
+        # Refine the sum-peak energy deficit (percent) instead of holding
+        # sum_deficit. Measured 0.06-0.40 % on the Amptek DPP, against the 0.1 %
+        # GeoPIXE assumes.
+        self.refine_sum_deficit = True
+        # partial pile-up: a flat box from max(E_i, E_j) to E_i + E_j under
+        # every sum peak (fitting.fit.PileupPlateauComponent)
+        self.use_pileup_plateau = True
+        # add a second plateau rising toward the sum. Better on 403001/006,
+        # but it destabilised 403004 and 403005 - off until that is understood
+        self.pileup_ramp = False
         # width of the Kb/Ka prior as a fraction of the pair's counts: a
         # departure of this much from the table ratio costs one sigma
         self.kbeta_prior_strength = 0.15
@@ -206,11 +216,13 @@ class FitOptions:
 
     def refine_groups(self):
         g = list(self.refine)
+        if self.use_pileup and self.refine_sum_deficit and 'sumdef' not in g:
+            g.append('sumdef')
         if self.response_model == 'empirical':
             # the measured response fixes the tail and shelf shape; cal and width
             # float, and with response_scale the tail and shelf AMOUNTS may be
             # scaled per spectrum (a5, a6), as line.pro's tail is
-            keep = ('cal', 'width', 'tail') if self.response_scale else ('cal', 'width')
+            keep = ('cal', 'width', 'sumdef') + (('tail',) if self.response_scale else ())
             return tuple(x for x in g if x in keep)
         for flag, name in ((self.use_escape_step, 'shelf'),
                            (self.use_contact_step, 'contact'),
@@ -859,6 +871,10 @@ class Session:
                 comps, sum_deficit=o.sum_deficit, e_high=o.e_high,
                 max_area=self.pileup_cap())
             comps = comps + [sump]
+            if o.use_pileup_plateau:
+                comps = comps + [_fit.PileupPlateauComponent(sump, 'flat')]
+                if o.pileup_ramp:
+                    comps = comps + [_fit.PileupPlateauComponent(sump, 'ramp')]
 
         subp = None
         if getattr(o, 'subthreshold_pileup_kev', 0.0) > 0:
@@ -899,11 +915,19 @@ class Session:
             # pile-up lines exist, then rebuild them from the final areas.
             res = go(start=res.pars, refine_again=True)
             got = dict(zip(res.names, res.areas))
+            snap = (list(getattr(sump, '_lines', []) or []), list(getattr(sump, '_pairs', []) or [])) if sump is not None else None
             if subp is not None:
                 subp.update(got, res.pars, len(self.spectrum), a)
             if sump is not None:
                 sump.update(got, amplitude=got.get('pileup'))
-            res = go(start=res.pars)
+            res2 = go(start=res.pars)
+            # Rebuilding the sum lines from the final areas can switch triples
+            # on and change the shape the refinement converged against. Keep
+            # it only if it does not make the fit worse.
+            if res2.chi2 <= res.chi2 or snap is None:
+                res = res2
+            else:
+                sump._lines, sump._pairs = snap
         self._fit = res
         return self._fit
 
