@@ -6,6 +6,19 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.25.0)
 
+Display only: no fitted number moves (golden spectra bit-identical, fix/spectrum-display).
+- Spectrum legend beside the plot, never over the data: as many columns as it needs, the plot
+  narrows by its width, and past 40 % of the width the last element entries fold into
+  "+ n more". **Lines...** picks the element groups drawn and listed, kept across fits
+  (BUGS.md "Choose which lines are drawn and listed").
+- **escape + pile-up curves**: the fit's escape lines and pile-up terms drawn as two summed
+  curves, as GeoPIXE's Escapes / Pileup overlays (which GeoPIXE builds from the data).
+  `FitResult.components` and `escape_spectrum()`, `Component.escape_profile()`.
+- Si escape markers move down 0.3 eV onto the database Si Ka_ (1.740 keV, escape_energy.pro:21)
+  where the fitted escape lines already were; the fitted escape lines are unchanged.
+- Ge detectors: K-beta escape markers at E - Ge Kb1 (branching 0.133), as GeoPIXE draws.
+- No more "wrapped C/C++ object ... has been deleted" from a draw queued as a window closed.
+
 ## 0.25.0 - 2026-10-21: GUI rework, maps, legend, layered yields; first public release
 
 The public repository starts from a snapshot of this state (2026-10-21). Commit hashes and CI
