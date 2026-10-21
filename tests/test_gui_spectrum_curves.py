@@ -22,11 +22,16 @@ def _fit_once():
     s = Session()
     s.load(str(SYNTHETIC))
     s.set_calibration(0.0016984, -0.37225)
+    # the quartz has no line above the Si K edge, so no escapes: add Ca Ka
+    # (3.69 keV), 2e5 counts, 130 eV FWHM
+    x = 0.0016984 * np.arange(len(s.spectrum)) - 0.37225
+    sig = 0.130 / 2.3548
+    s.spectrum = s.spectrum + np.round(2e5 * 0.0016984 / (sig * np.sqrt(
+        2 * np.pi)) * np.exp(-0.5 * ((x - 3.69) / sig) ** 2))
     s.options.use_escape_peaks = True
     return s.run_fit(['O', 'Si', 'Ca'])
 
 
-@pytest.mark.xfail(strict=True, reason=BUG)
 def test_fit_result_exposes_escape_profile_and_spectrum():
     """The escape share of each component and of the fit must be separable."""
     if config.database_path(required=False) is None:
@@ -57,6 +62,13 @@ def test_fit_result_exposes_escape_profile_and_spectrum():
     got = r1.escape_spectrum()
     assert got is not None and got.sum() > 0
     np.testing.assert_allclose(got, expect, rtol=1e-12)
+    # an independent bound: the escapes are part of the model above the
+    # background, never more, inside the fit window
+    lo, hi = 0.2, 6.6
+    E = 0.0016984 * np.arange(n) - 0.37225
+    w = (E >= lo) & (E <= hi)
+    assert (got[w] >= 0).all()
+    assert (got[w] <= (r1.model - r1.background)[w] + 1e-9).all()
 
 
 # ---------------------------------------------------- B: the canvas curves
@@ -101,15 +113,15 @@ def _legend(canvas):
     return [t.get_text() for t in canvas.ax.get_legend().get_texts()]
 
 
-@pytest.mark.xfail(strict=True, reason=BUG)
 def test_artefact_curves_draw_one_escape_and_one_pileup_line(canvas):
     """With the toggle on, escapes and summed pile-up must be single curves."""
     r, bk, esc = _fake(canvas)
     canvas.set_artefact_curves(True)
     e, p = _lines(canvas, 'escapes'), _lines(canvas, 'pile-up')
     assert len(e) == 1 and len(p) == 1, (e, p)
+    # atol: (y + bk) - bk is not exactly y where y is 0
     np.testing.assert_allclose(p[0].get_ydata() - bk,
-                               r.profiles[:, 2:] @ r.areas[2:])
+                               r.profiles[:, 2:] @ r.areas[2:], atol=1e-9)
     # the individual pileup component is not drawn on top of the sum
     assert not _lines(canvas, 'pileup')
     texts = _legend(canvas)
@@ -117,7 +129,6 @@ def test_artefact_curves_draw_one_escape_and_one_pileup_line(canvas):
     assert any(t.startswith('pile-up') for t in texts), texts
 
 
-@pytest.mark.xfail(strict=True, reason=BUG)
 def test_artefact_curves_survive_components_off(canvas):
     """The curves are independent of the per-element component toggle."""
     _fake(canvas, comps=False)
@@ -126,7 +137,6 @@ def test_artefact_curves_survive_components_off(canvas):
     assert len(_lines(canvas, 'pile-up')) == 1
 
 
-@pytest.mark.xfail(strict=True, reason=BUG)
 def test_artefact_curves_default_off_keeps_component_line(canvas):
     """Off by default: no curves, and the per-component pileup line stays."""
     _fake(canvas)
@@ -139,7 +149,6 @@ def test_artefact_curves_default_off_keeps_component_line(canvas):
 
 # ---------------------------------------------------------------- C: the GUI
 
-@pytest.mark.xfail(strict=True, reason=BUG)
 def test_main_window_has_unchecked_curves_checkbox(qtbot):
     """MainWindow needs chk_curves, off by default, wired to the canvas."""
     pytest.importorskip('PyQt5.QtWidgets')

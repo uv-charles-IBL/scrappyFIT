@@ -52,6 +52,12 @@ COMP_CYCLE = ['#1F4FD8', '#E07A00', '#7B3FA8', '#00873E', '#C4187A',
 
 REF = '#8C9AAE'           # the whole-field spectrum drawn behind a region's
 
+
+def is_pileup(name):
+    """The pile-up terms of a fit: 'pileup' (sum peaks), 'pileup flat' /
+    'pileup ...' (plateau) and 'subthreshold pileup'."""
+    return name.startswith('pileup') or name == 'subthreshold pileup'
+
 #: Legend modes. 'compact' keeps data, fit, background and artefacts; 'all'
 #: adds every drawn element component; 'off' draws none.
 LEGEND_MODES = ('compact', 'all', 'off')
@@ -118,6 +124,7 @@ class SpectrumCanvas(_Canvas):
         self.fig.subplots_adjust(left=0.09, right=0.98, top=0.94, bottom=0.11)
         self._log = True
         self._show_comps = True
+        self._artefact_curves = False   # summed escape, pile-up curves
         self.legend_mode = 'compact'
         self.hidden = set()     # element groups not drawn ('Fe K', 'Ag M')
         self._legend_layout = {}    # (size, entries) -> (kept, columns)
@@ -140,6 +147,14 @@ class SpectrumCanvas(_Canvas):
 
     def set_components(self, on):
         self._show_comps = bool(on)
+        self.redraw()
+
+    def set_artefact_curves(self, on):
+        """Draw the fit's escape lines and pile-up terms as two summed
+        curves, 'escapes' and 'pile-up', as GeoPIXE overlays its 'Escapes'
+        and 'Pileup' spectra (spectrum_display_eventcb.pro:3452, :3780).
+        Drawn with or without the element components; display only."""
+        self._artefact_curves = bool(on)
         self.redraw()
 
     def set_legend(self, mode):
@@ -230,6 +245,8 @@ class SpectrumCanvas(_Canvas):
                         continue
                     c = r.profiles[:n, i] * r.areas[i]
                     special = nm in ARTEFACT_STYLE
+                    if self._artefact_curves and is_pileup(nm):
+                        continue            # drawn summed, below
                     # Elements are hidden below 0.3% of the tallest peak, or
                     # a busy spectrum turns into spaghetti. Artefacts are NOT
                     # subject to that: pile-up on run 287427 is 58 counts
@@ -262,6 +279,8 @@ class SpectrumCanvas(_Canvas):
                         # the legend may fold elements into '+ n more';
                         # other components (pile-up plateau) always show
                         ln._sf_element = grp is not None
+            if self._artefact_curves:
+                self._draw_artefact_curves(r, E, n, bk, st.get('xlim'))
             # the model is drawn LAST so it is never buried under a component
             self.ax.plot(E[:n], r.model[:n], lw=1.8, color=MODEL, zorder=4,
                          label='fit  chi2r=%.2f' % r.reduced_chi2)
@@ -337,6 +356,29 @@ class SpectrumCanvas(_Canvas):
             self.ax.set_title(st['title'], fontsize=10, color=INK)
         self.ax.tick_params(labelbottom=False)
         self.draw_idle()
+
+    def _draw_artefact_curves(self, r, E, n, bk, xlim):
+        """Summed escape and pile-up spectra over the background. The
+        counts in the legend are those inside xlim (the fit window), not
+        the whole spectrum the curve is drawn over."""
+        lo, hi = xlim or (float(E[0]), float(E[n - 1]))
+        win = (E[:n] >= lo) & (E[:n] <= hi)
+        base = bk[:n] if bk is not None else 0.0
+        esc = getattr(r, 'escape_spectrum', None)
+        esc = esc() if callable(esc) else None
+        pile = [i for i, nm in enumerate(r.names)
+                if is_pileup(nm) and r.areas[i] > 0]
+        for curve, nm, what in (
+                (esc[:n] if esc is not None else None, 'escape', 'escapes'),
+                (sum(r.profiles[:n, i] * r.areas[i] for i in pile)
+                 if pile else None, 'pileup', 'pile-up')):
+            if curve is None:
+                continue
+            col, ls, lw = ARTEFACT_STYLE[nm]
+            self.ax.plot(E[:n], curve + base, lw=lw + 0.2, ls=ls, color=col,
+                         alpha=0.95, zorder=3,
+                         label='%s (fit, %.0f counts)' % (what,
+                                                          curve[win].sum()))
 
     def _place_legend(self, draw=True):
         """Put the legend right of the axes, never over the data.

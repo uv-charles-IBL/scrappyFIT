@@ -771,6 +771,12 @@ class MainWindow(QtWidgets.QMainWindow):
                          'emits, and a fit offered one will reach for the '
                          'nearest element.')
         b_art.clicked.connect(self.on_artefacts)
+        self.chk_curves = QtWidgets.QCheckBox('escape + pile-up curves')
+        self.chk_curves.setToolTip(
+            "Draw the fit's escape lines and pile-up terms as two summed "
+            "curves, as GeoPIXE's Escapes and Pileup overlays, with or "
+            'without the element components. Display only.')
+        self.chk_curves.toggled.connect(self.spec.set_artefact_curves)
         b_nomark = QtWidgets.QPushButton('Clear markers')
         b_nomark.clicked.connect(self.on_clear_markers)
 
@@ -801,7 +807,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for x in (cb_log, cb_cmp, cb_lab, self.chk_preview, self.chk_id,
                   self.ed_x0, self.ed_x1, self.ed_y1, b_ax, b_axr):
             bar.addWidget(x)
-        for x in (b_full, b_pk, b_lab, b_art, b_nomark,
+        for x in (b_full, b_pk, b_lab, b_art, self.chk_curves, b_nomark,
                   QtWidgets.QLabel('legend'), self.cmb_legend, self.btn_lines,
                   self.chk_field):
             bar2.addWidget(x)

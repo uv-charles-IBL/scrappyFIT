@@ -224,6 +224,15 @@ look first.** A good fit scatters within ±2σ. A localised excursion of 5σ or
 more means something in the model is wrong — and if you add an element to
 absorb it, you have hidden the problem rather than solved it.
 
+Tick **escape + pile-up curves** to draw the fit's escape lines and its pile-up
+terms as two summed curves over the background, as GeoPIXE's Display > Escapes
+and Pileup overlays, with or without the element components. They are the
+fit's own (escape lines tied to each parent's fitted area), where GeoPIXE
+builds its overlays from the measured data. The legend gives their counts
+inside the fit range. The escape curve sums every element's escapes, including
+those of groups hidden with **Lines...**. **Show escape + sum peaks** still
+marks where each escape and sum peak falls, including the Ge K-beta escapes.
+
 Reduced χ² appears in the legend and status bar. Typical values on real
 spectra here are 1.8–2.5; below about 1.5 with high counts usually means you
 have too many free components.
