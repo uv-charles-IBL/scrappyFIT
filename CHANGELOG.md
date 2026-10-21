@@ -6,6 +6,12 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.25.0)
 
+### Fixes
+- The error dialog is not shown on Qt's offscreen platform (headless tests, CI): `QMessageBox.show()`
+  crashed the interpreter there (PyQt5 5.15.11 / Qt 5.15.2), so any GUI test that ran before an
+  excepthook test took the whole pytest run down. The error is still logged; the log also records
+  "error dialog not shown". Real desktops are unchanged.
+
 ### Tests and process
 - GUI journey timing checks allow a fixed 200 ms on top of budget x scale (`JITTER_MS`,
   `tests/test_gui_journeys.py`). Sub-200 ms steps were failing on disk and scheduler noise

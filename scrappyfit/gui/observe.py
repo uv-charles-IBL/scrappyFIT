@@ -143,9 +143,22 @@ def _make_notifier():
 
 
 def _dialog(title, text):
-    """A non-modal box, so the window stays usable behind it."""
+    """A non-modal box, so the window stays usable behind it.
+
+    Not on Qt's offscreen platform (the headless tests and CI): there is no
+    screen and nobody to read it, and QMessageBox.show() crashes the
+    interpreter there (access violation, any icon; a plain QDialog does not;
+    PyQt5 5.15.11 / Qt 5.15.2 on Windows, scratch dlg_crash2.py, 2026-10-21).
+    The error is already in the log either way.
+    """
     try:
         from PyQt5 import QtCore, QtWidgets
+        app = QtWidgets.QApplication.instance()
+        if app is None or app.platformName() == 'offscreen':
+            _state['dialogs_suppressed'] = _state.get('dialogs_suppressed', 0) + 1
+            log_event('error dialog not shown', platform=(
+                app.platformName() if app is not None else None), title=title)
+            return
         box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, title,
                                     text[:2000])
         box.setDetailedText(text)

@@ -188,6 +188,29 @@ def test_excepthook_logs_and_does_not_exit(logs):
     assert observe.handler_count() == 1
 
 
+def test_excepthook_after_a_widget_does_not_crash(qtbot, logs):
+    """With a QApplication up (any widget test before this one), the error
+    dialog used to be shown with QMessageBox, which crashes the interpreter on
+    the offscreen platform. Now it is logged as not shown."""
+    from PyQt5 import QtWidgets
+    from scrappyfit.gui import observe
+    w = QtWidgets.QWidget()
+    qtbot.addWidget(w)
+    w.show()
+    observe.uninstall()
+    observe.install(log_dir=str(logs))           # notifier now exists
+    before = observe._state.get('dialogs_suppressed', 0)
+    try:
+        raise ValueError('boom after widget')
+    except ValueError:
+        sys.excepthook(*sys.exc_info())
+    assert observe._state.get('dialogs_suppressed', 0) == before + 1
+    recs = _records(logs)
+    assert any(r['event'] == 'error dialog not shown' for r in recs)
+    assert any(r['level'] == 'ERROR' and 'boom after widget' in
+               r.get('traceback', '') for r in recs)
+
+
 # ------------------------------------------------------------ job runner
 
 def test_jobrunner_coalesces_previews_and_cancels(qtbot, logs):
