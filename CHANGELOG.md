@@ -4,7 +4,9 @@ Versions follow [semantic versioning](https://semver.org). Physics changes
 that alter fitted numbers are always called out, because a result is only
 reproducible against a stated version.
 
-## Unreleased (since v0.24.0)
+## Unreleased (since v0.25.0)
+
+## 0.25.0 - 2026-10-21: GUI rework, maps, legend, layered yields; first public release
 
 The public repository starts from a snapshot of this state (2026-10-21). Commit hashes and CI
 run numbers below, and in every older entry, refer to the private archive of the earlier
