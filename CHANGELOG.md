@@ -4,7 +4,9 @@ Versions follow [semantic versioning](https://semver.org). Physics changes
 that alter fitted numbers are always called out, because a result is only
 reproducible against a stated version.
 
-## Unreleased (since v0.25.0)
+## Unreleased (since v0.26.0)
+
+## 0.26.0 - 2026-10-21: spectrum display, Sabbatucci-Salvat fetched on first use
 
 ### Fixes
 - The error dialog is not shown on Qt's offscreen platform (headless tests, CI): `QMessageBox.show()`
