@@ -9,6 +9,19 @@ Run alone:   python -m pytest -q -m gui
 Record:      SCRAPPYFIT_TIMINGS_OUT=path.json python -m pytest -q -m gui
              writes each step's measured ms instead of only checking it.
 Slower box:  SCRAPPYFIT_BUDGET_SCALE=2 multiplies every budget.
+
+A step may take its budget times the scale plus a fixed JITTER_MS. Disk
+writes, garbage collection and the OS scheduler cost tens of milliseconds
+whatever the step does, so on sub-200 ms steps (file export, open) a pure
+1.5x budget measured runner noise. J3.export_yield (budget 69 ms, x2 on CI)
+failed CI at 283 ms (2026-10-20, old-repo run 39517773929) and at 145 ms
+(2026-10-21, run 39639849089), and J5.open1 missed on the desktop at
+203-227 ms against 194 ms (BUGS.md). The largest overshoot seen is
+283 - 138 = 145 ms, so JITTER_MS = 200 leaves about 55 ms of margin.
+Cost: the smallest steps (J3.quantify 50 ms, J3.export 55 ms) may now run
+3-5x their budget before failing, which is accepted because there the
+budget was catching noise; on the fit steps (budgets of 7-30 s) the
+allowance is 1-3 %.
 """
 import hashlib
 import json
@@ -64,6 +77,10 @@ LMF_CAL = (0.0016984, -0.37225)          # golden recipe for 287424
 LMF_ELS = ['O', 'Na', 'Si', 'Cl']
 
 _TIMINGS = {}
+
+
+# fixed allowance on top of every scaled budget; see the module docstring
+JITTER_MS = 200.0
 
 
 def _budgets():
@@ -144,8 +161,9 @@ class Driver:
         budget = _budgets().get(key)
         if budget is not None and not os.environ.get('SCRAPPYFIT_TIMINGS_OUT'):
             scale = float(os.environ.get('SCRAPPYFIT_BUDGET_SCALE', '1'))
-            assert ms <= budget * scale, '%s took %.0f ms, budget %.0f ms' % (
-                key, ms, budget * scale)
+            allowed = budget * scale + JITTER_MS
+            assert ms <= allowed, '%s took %.0f ms, budget %.0f ms (%.0f x %g + %.0f)' % (
+                key, ms, allowed, budget, scale, JITTER_MS)
         return ms
 
     # -- user actions ----------------------------------------------------
@@ -323,7 +341,9 @@ def test_j4_batch_cancel_rerun(qtbot, log_dir, no_dialogs, tmp_path):
     budget = _budgets().get('J4.cancel_latency')
     if budget and not os.environ.get('SCRAPPYFIT_TIMINGS_OUT'):
         scale = float(os.environ.get('SCRAPPYFIT_BUDGET_SCALE', '1'))
-        assert lat <= budget * scale, 'cancel took %.0f ms' % lat
+        allowed = budget * scale + JITTER_MS
+        assert lat <= allowed, 'J4.cancel_latency took %.0f ms, budget %.0f ms (%.0f x %g + %.0f)' % (
+            lat, allowed, budget, scale, JITTER_MS)
     assert w.last_batch is not None and len(w.last_batch) < len(BATCH)
     assert not d.errors()
     # nothing left disabled behind it
