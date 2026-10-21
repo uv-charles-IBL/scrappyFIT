@@ -53,7 +53,33 @@ REF = '#8C9AAE'           # the whole-field spectrum drawn behind a region's
 LEGEND_MODES = ('compact', 'all', 'off')
 
 
-class SpectrumCanvas(FigureCanvasQTAgg):
+class _Canvas(FigureCanvasQTAgg):
+    """A Qt canvas that is safe to draw on after its widget is gone.
+
+    draw_idle queues _draw_idle on the event loop, and the toolbar sets a
+    wait cursor around each draw (backend_bases _wait_cursor_for_draw_cm).
+    With the C++ widget gone by then, that set_cursor printed 'wrapped
+    C/C++ object of type SpectrumCanvas has been deleted' (fast suite,
+    2026-10-21; how it went mid-draw was not reproduced).
+    cancel_draws() drops a queued draw; drawing and the cursor are no-ops
+    once the widget is deleted.
+    """
+
+    def cancel_draws(self):
+        self._draw_pending = False
+
+    def _draw_idle(self):
+        if sip.isdeleted(self):
+            self._draw_pending = False
+            return
+        super()._draw_idle()
+
+    def set_cursor(self, cursor):
+        if not sip.isdeleted(self):
+            super().set_cursor(cursor)
+
+
+class SpectrumCanvas(_Canvas):
     """Spectrum with the fitted model, components and a residual panel."""
 
     rangeSelected = QtCore.pyqtSignal(float, float)
@@ -284,7 +310,7 @@ MAP_BAR_PX = 90
 MAP_PCT = (2.0, 99.0)
 
 
-class MapCanvas(FigureCanvasQTAgg):
+class MapCanvas(_Canvas):
     """An elemental map, with rectangle selection that becomes a mask."""
 
     regionSelected = QtCore.pyqtSignal(object)     # bool array, map-shaped

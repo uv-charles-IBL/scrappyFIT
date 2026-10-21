@@ -412,6 +412,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, '_live_timer', None) is not None:
             self._live_timer.stop()
         self.jobs.shutdown()
+        # a draw queued now would run after the canvases are deleted
+        self.spec.cancel_draws()
+        self.map.cancel_draws()
         log_event('window closed')
         super().closeEvent(ev)
 

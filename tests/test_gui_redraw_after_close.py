@@ -11,7 +11,6 @@ pytest.importorskip('PyQt5.QtWidgets')
 BUG = 'BUGS.md: A deferred draw_idle fires after a window closes'
 
 
-@pytest.mark.xfail(strict=True, reason=BUG)
 @pytest.mark.parametrize('kind', ['SpectrumCanvas', 'MapCanvas'])
 def test_queued_draw_on_deleted_canvas_is_a_noop(qtbot, capfd, kind):
     """A pending _draw_idle on a deleted canvas must not raise 'has been deleted'."""
@@ -29,7 +28,6 @@ def test_queued_draw_on_deleted_canvas_is_a_noop(qtbot, capfd, kind):
     assert 'has been deleted' not in out.out + out.err
 
 
-@pytest.mark.xfail(strict=True, reason=BUG)
 def test_closing_main_window_cancels_pending_draws(qtbot):
     """MainWindow.close() must leave no draw pending on its spectrum and map canvases."""
     from scrappyfit.gui.app import MainWindow
@@ -41,3 +39,22 @@ def test_closing_main_window_cancels_pending_draws(qtbot):
     w.close()
     assert not w.spec._draw_pending
     assert not w.map._draw_pending
+
+
+def test_toolbar_wait_cursor_on_deleted_canvas_is_quiet(qtbot, capfd):
+    """The observed path: a queued _draw_idle -> draw -> the toolbar's wait
+    cursor -> set_cursor, on a canvas whose C++ object is gone."""
+    from PyQt5 import QtWidgets, sip
+    from scrappyfit.gui.canvases import SpectrumCanvas, toolbar_for
+    parent = QtWidgets.QWidget()
+    qtbot.addWidget(parent)
+    canvas = SpectrumCanvas(parent)
+    toolbar_for(canvas, parent)
+    assert canvas.toolbar is not None
+    sip.delete(canvas)
+    canvas._draw_pending = True
+    canvas._draw_idle()
+    with canvas.toolbar._wait_cursor_for_draw_cm():
+        pass
+    out = capfd.readouterr()
+    assert 'has been deleted' not in out.out + out.err
