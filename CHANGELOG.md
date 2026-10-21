@@ -11,6 +11,14 @@ reproducible against a stated version.
   crashed the interpreter there (PyQt5 5.15.11 / Qt 5.15.2), so any GUI test that ran before an
   excepthook test took the whole pytest run down. The error is still logged; the log also records
   "error dialog not shown". Real desktops are unchanged.
+- Licence: `MAC_SabbatucciSalvat2016.txt` is no longer in the repository or the wheel. It is
+  converted from EGSnrc's AGPL-3.0 `photo_shellwise.data`, which cannot ship inside an MIT
+  package; v0.25.0 and earlier shipped it, and there it is under AGPL-3.0 (THIRD_PARTY_NOTICES.md).
+  `python -m scrappyfit.io.sabbatucci` (or `fetch()`) downloads EGSnrc's file at a pinned commit
+  and rebuilds the table, byte-identical to v0.25.0's (SHA-256 checked), into `~/.scrappyfit/data`;
+  choosing it in the GUI's MAC box offers that download behind a consent dialog. Selecting
+  `sabbatucci` without it now raises `SabbatucciMissing` saying how to get it. No fitted number
+  changes: `mixed` (the default) never used it, and the fetched table is the same file.
 
 ### Tests and process
 - GUI journey timing checks allow a fixed 200 ms on top of budget x scale (`JITTER_MS`,

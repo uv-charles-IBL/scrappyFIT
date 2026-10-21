@@ -337,6 +337,34 @@ class Database:
         """Every dataset name mu() will accept, sorted."""
         return sorted(set(cls.MAC_FILES) | set(cls.MAC_COMPUTED))
 
+    def _mac_path(self, key):
+        """Where a tabulated MAC file is, or None. The Sabbatucci table is
+        not shipped (EGSnrc's data is AGPL-3.0): after the database's own
+        dat/ it is looked for in the per-user folder that
+        scrappyfit.io.sabbatucci.fetch() installs it in."""
+        fn = self.MAC_FILES[key]
+        p = os.path.join(self.dat, fn)
+        if os.path.exists(p):
+            return p
+        from ..io import sabbatucci
+        if fn == sabbatucci.FILENAME:
+            q = sabbatucci.installed_path()
+            if q.exists():
+                return str(q)
+            return None
+        return p
+
+    def mac_installed(self, name):
+        """True when mu(..., name) can be answered without fetching anything."""
+        key = name.lower()
+        if key in self.MAC_COMPUTED:
+            return True
+        if key not in self.MAC_FILES:
+            raise KeyError(
+                'unknown MAC dataset %r. Valid names are: %s'
+                % (name, ', '.join(self.mac_datasets())))
+        return key in self._mac or self._mac_path(key) is not None
+
     def load_mac(self, name):
         """Load one of the tabulated MAC databases written for GeoPIXE."""
         key = name.lower()
@@ -344,11 +372,14 @@ class Database:
             raise KeyError(
                 'unknown MAC dataset %r. Valid names are: %s'
                 % (name, ', '.join(self.mac_datasets())))
-        fn = self.MAC_FILES[key]
+        path = self._mac_path(key)
+        if path is None:
+            from ..io import sabbatucci
+            raise sabbatucci.SabbatucciMissing(sabbatucci.missing_message())
         tab = {}
         cur = None
         mode = 0
-        for raw in open(os.path.join(self.dat, fn), errors='ignore'):
+        for raw in open(path, errors='ignore'):
             t = raw.strip()
             if not t or t.startswith(';'):
                 continue
