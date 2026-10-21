@@ -6,6 +6,12 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.25.0)
 
+### Fixes
+- The error dialog is not shown on Qt's offscreen platform (headless tests, CI): `QMessageBox.show()`
+  crashed the interpreter there (PyQt5 5.15.11 / Qt 5.15.2), so any GUI test that ran before an
+  excepthook test took the whole pytest run down. The error is still logged; the log also records
+  "error dialog not shown". Real desktops are unchanged.
+
 ## 0.25.0 - 2026-10-21: GUI rework, maps, legend, layered yields; first public release
 
 The public repository starts from a snapshot of this state (2026-10-21). Commit hashes and CI
