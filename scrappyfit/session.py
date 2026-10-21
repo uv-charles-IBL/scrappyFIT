@@ -393,6 +393,7 @@ class Session:
         self.adc = 0
         self.mask = None
         self.mask_name = ''
+        self.map_info = {}          # how the last element_map was made
         self.dam = None
         self._live_s = None
         self.mca_info = None
@@ -828,6 +829,7 @@ class Session:
         """
         if self.events is None:
             raise RuntimeError('maps need a list-mode (.lmf) file')
+        self.map_info = {}           # nothing stale if this map fails
         if isinstance(which, str):
             E0 = self.map_line_energy(*self.parse_line(which))
         else:
@@ -840,8 +842,30 @@ class Session:
             raise ValueError('%s at %.3f keV is outside the spectrum '
                              '(channels 0-%d, %.2f-%.2f keV)'
                              % (which, E0, nch - 1, b, a * (nch - 1) + b))
-        d = hi - lo + 1
-        bg = ((lo - 2 * d, lo - d), (hi + d, hi + 2 * d)) if subtract else None
+        bg = None
+        if subtract:
+            # flanks only from channels that hold events: below the zero of
+            # energy and past the last count there is nothing to read. The
+            # first count is the detector threshold, and a flank just above
+            # it is on the rising edge and still reads somewhat low.
+            full = (self.full_spectrum if self.full_spectrum is not None
+                    else self.spectrum)
+            nz = np.flatnonzero(full)
+            first = max(int(np.ceil(-b / a)) if a > 0 else 0,
+                        int(nz[0]) if nz.size else 0, 0)
+            last = int(nz[-1]) if nz.size else nch - 1
+            bg = _maps.flanks(lo, hi, first, last)
+            if not bg:
+                raise ValueError('%s: neither background flank is on the '
+                                 'spectrum; map it without subtraction'
+                                 % (which,))
+        self.map_info = dict(
+            kind='window', line=str(which), energy=E0, window=(lo, hi),
+            background=('none' if bg is None else
+                        'linear between flanks' if len(bg) == 2 else
+                        'flat, %s flank only'
+                        % ('low' if bg[0][1] < lo else 'high')),
+            flanks=bg or ())
         x, y, e = self.events
         return _maps.smooth(
             _maps.element_map(x, y, e, lo, hi, bg=bg, binning=binning), 1.0)

@@ -16,6 +16,17 @@ reproducible against a stated version.
   maps, the default colour limits, and the pixels a percentile mask picks (so the spectrum and fit of
   a region masked from a map that touches the edge). Edge pixels now average fewer neighbours and are
   noisier. DA maps and unmasked fits are unaffected.
+- Net window maps take their background flanks only from channels that hold events: from the zero of
+  energy (and the spectrum's first count) to its last count. A flank clipped to under half the peak
+  window's width is dropped and the background is flat from the other flank; with neither, the map
+  refuses ("map it without subtraction"). `Session.map_info` records the window, the flanks and which
+  background was used. On 287424 the first count is channel 305 (0.146 keV), so C (flank 159-249) and
+  N (229-318) lose their low flank: mean net per bin-4 pixel C 1.05 -> -3.64 and N 8.14 -> 6.43,
+  O and Si unchanged (`D:\Claude gens misc\maps-phase3\flank_check.py`, 2026-10-21). The C map
+  now goes negative because its only flank, 518-608, sits on O K: a window map cannot separate them;
+  use a DA map. A line near the top of the spectrum likewise no longer reads an empty high flank.
+  A percentile mask cut from a net C or N map now selects different pixels, so that region's
+  spectrum and fit change; unmasked fits do not.
 
 ## 0.26.0 - 2026-10-21: spectrum display, Sabbatucci-Salvat fetched on first use
 

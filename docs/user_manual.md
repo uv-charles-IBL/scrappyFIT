@@ -289,9 +289,14 @@ This is the part that matters most and the part GeoPIXE makes hardest.
 Go to the **Maps** tab, choose a line, **Show map**. The list holds the lines
 inside the fit range: `Si` is the K line, `Ag L` and `Pb M` the L-alpha and
 M-alpha lines; typing `AgL`, `Ag:L`, `ag l` or an energy in keV works too. A line whose
-peak window is off the spectrum is refused (the flanking background windows
-are not checked yet, BUGS.md), and so is **Mask above percentile** on a
-flat map (every pixel would be "above" it). Map browsing never changes the
+peak window is off the spectrum is refused, and so is **Mask above percentile** on a
+flat map (every pixel would be "above" it). The background flanks, each one
+peak-width wide and one width from the peak, are taken only from channels that
+hold events (from the first count, usually the detector threshold, to the last).
+A flank cut to under half a width is dropped and the background is then flat
+from the other flank alone, which the message line reports; with neither flank
+the map is refused. Near the threshold a flank sits on the rising edge of the
+spectrum and reads low, so a light-element net map there reads high. Map browsing never changes the
 spectrum or the fit; only a mask does, and the title then carries its name.
 
 Then either:

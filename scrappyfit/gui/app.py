@@ -1525,6 +1525,11 @@ class MainWindow(QtWidgets.QMainWindow):
                                                         or 'map').stem))
         self.map.set_mask(s.mask)
         self.tabs.setCurrentIndex(1)
+        fl = s.map_info.get('flanks') or ()
+        if len(fl) == 1:
+            self.say('%s: one background flank is off the populated spectrum, '
+                     'so the background is flat from the %s'
+                     % (el, s.map_info['background'].split(', ')[1]))
         if self.chk_sub.isChecked() and np.nanmedian(m) < 0:
             self.say('WARNING: this net map is mostly negative. Flanking '
                      'subtraction fails where a weak line sits between strong '
