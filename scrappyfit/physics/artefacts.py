@@ -25,8 +25,14 @@ knowing: an unexplained feature in the light-element region is NOT an escape
 peak and something else is going on. On Ge the edge is ~11 keV (db).
 
 As in GeoPIXE's escape_energy.pro, only Si and Ge crystals have escapes; any
-other crystal gets none rather than a silicon guess. The Ge Kb escape that
-GeoPIXE also marks is not drawn here.
+other crystal gets none rather than a silicon guess. Ge also escapes its Kb1
+(db, 10.98 keV; branching 0.133, escape_fraction.pro:29), which GeoPIXE's
+display adds to the alpha escapes (spectrum_display_eventcb.pro:3769-3776);
+it is marked here as '<parent> esc Kb'. Si has no beta escape.
+
+Each element is one parent here, at its major line with the element's whole
+area, so the escapes of its minor lines (Mo Kb's, say) are not marked;
+GeoPIXE's display shifts the whole measured spectrum instead.
 
 Sum peaks
 ---------
@@ -67,6 +73,15 @@ def crystal_escape(db, crystal_Z):
     return 0.0, 0.0
 
 
+def crystal_escape_beta(db, crystal_Z):
+    """(K-beta escape energy keV, branching) for the crystal: Ge Kb1 and
+    0.133 (escape_energy.pro:13, escape_fraction.pro:29), else (0, 0).
+    Same lookup and fallback as EscapeModel.e_beta / ba_beta."""
+    if int(crystal_Z) == 32:
+        return db.lineE.get(32, {}).get('Kb1', 10.982), 0.133
+    return 0.0, 0.0
+
+
 class Artefact:
     __slots__ = ('kind', 'energy', 'label', 'parents', 'intensity', 'fwhm_eV')
 
@@ -83,12 +98,19 @@ class Artefact:
             self.kind, self.label, self.energy, self.intensity or 0)
 
 
+def _rough_fraction(E, k_edge):
+    """escape_peaks' default escape fraction (see there)."""
+    return 0.010 * (k_edge / E) ** 2.5
+
+
 def escape_peaks(lines, e_low=0.2, e_high=6.6, escape_fraction=None,
-                 min_counts=1.0, escape_energy=SI_KA, k_edge=SI_K_EDGE):
+                 min_counts=1.0, escape_energy=SI_KA, k_edge=SI_K_EDGE,
+                 suffix='esc'):
     """Escape peaks for a set of (label, energy, counts).
 
     escape_energy, k_edge: the crystal's, from crystal_escape(); silicon by
     default. An escape energy of zero means a crystal with no escapes.
+    suffix names the marker, '<label> <suffix>' ('esc Kb' for a beta escape).
 
     escape_fraction: callable(E) -> fraction, or None for a rough default.
     The default is a crude 1/E-ish falloff anchored near 1% just above the
@@ -109,11 +131,12 @@ def escape_peaks(lines, e_low=0.2, e_high=6.6, escape_fraction=None,
         if escape_fraction is not None:
             f = float(escape_fraction(E))
         else:
-            f = 0.010 * (k_edge / E) ** 2.5
+            f = _rough_fraction(E, k_edge)
         n = (counts or 0.0) * f
         if n < min_counts:
             continue
-        out.append(Artefact('escape', Ee, '%s esc' % label, (label,), n))
+        out.append(Artefact('escape', Ee, '%s %s' % (label, suffix),
+                            (label,), n))
     return sorted(out, key=lambda a: a.energy)
 
 
@@ -194,7 +217,8 @@ def estimate_pileup_fraction(spectrum, cal, lines, e_low=0.2, e_high=6.6):
 
 
 def predict(db, spectrum, cal, elements, e_low=0.2, e_high=6.6,
-            areas=None, resolution=None, escape_fraction=None, crystal_Z=14):
+            areas=None, resolution=None, escape_fraction=None, crystal_Z=14,
+            escape_fraction_beta=None):
     """Everything at once, for the GUI.
 
     elements: [(Z, shell)]. areas: {name: counts} from a fit, or None to use
@@ -202,6 +226,10 @@ def predict(db, spectrum, cal, elements, e_low=0.2, e_high=6.6,
     fraction, normally the fit's own EscapeModel.fraction, or None for the
     rough default in escape_peaks. crystal_Z: the detector crystal
     (options.crystal_Z), which sets the escape energy and edge.
+    escape_fraction_beta: callable(E) for the Ge K-beta escape, normally
+    lambda E: EscapeModel.fraction(E, beta=True); None takes the branching
+    0.133 times the alpha fraction, which ignores the small change of the
+    crystal's attenuation between Ka1 and Kb1.
 
     Returns (escapes, sums, pileup_fraction).
     """
@@ -229,6 +257,15 @@ def predict(db, spectrum, cal, elements, e_low=0.2, e_high=6.6,
     e_esc, k_edge = crystal_escape(db, crystal_Z)
     esc = escape_peaks(lines, e_low, e_high, escape_fraction=escape_fraction,
                        escape_energy=e_esc, k_edge=k_edge)
+    e_beta, ba = crystal_escape_beta(db, crystal_Z)
+    if e_beta > 0:
+        fb = escape_fraction_beta
+        if fb is None:
+            fa = escape_fraction or (lambda E: _rough_fraction(E, k_edge))
+            fb = lambda E: ba * fa(E)
+        esc = sorted(esc + escape_peaks(
+            lines, e_low, e_high, escape_fraction=fb, escape_energy=e_beta,
+            k_edge=k_edge, suffix='esc Kb'), key=lambda a: a.energy)
     sums = sum_peaks(lines, e_low, e_high, pileup_fraction=p,
                      total_counts=y.sum(), resolution=resolution)
     return esc, sums, p

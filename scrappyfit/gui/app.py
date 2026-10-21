@@ -758,7 +758,7 @@ class MainWindow(QtWidgets.QMainWindow):
                          'identification, ready for export.')
         b_lab.clicked.connect(self.on_label_peaks)
         b_art = QtWidgets.QPushButton('Show escape + sum peaks')
-        b_art.setToolTip('Mark where silicon escape peaks and pile-up sum '
+        b_art.setToolTip('Mark where detector escape peaks and pile-up sum '
                          'peaks fall. Both put real features where no element '
                          'emits, and a fit offered one will reach for the '
                          'nearest element.')
@@ -1577,6 +1577,8 @@ class MainWindow(QtWidgets.QMainWindow):
             s.db, s.spectrum, s.cal, els, e_low=o.e_low, e_high=o.e_high,
             areas=s.areas() or None, resolution=res,
             escape_fraction=(em.fraction if em else None),
+            escape_fraction_beta=((lambda E: em.fraction(E, beta=True))
+                                  if em else None),
             crystal_Z=o.crystal_Z)
         crystal = s.db.sym.get(o.crystal_Z, 'Z=%d' % o.crystal_Z)
         e_esc, k_edge = artefacts.crystal_escape(s.db, o.crystal_Z)

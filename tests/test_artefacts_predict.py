@@ -109,7 +109,6 @@ def test_si_escape_markers_use_the_fit_escape_energy():
             db.line_energy(Z, 1) - em.e_alpha, abs=1e-9)
 
 
-@pytest.mark.xfail(strict=True, reason='BUGS.md: No Ge K-beta escape markers')
 def test_ge_crystal_gets_kbeta_escape_markers():
     """predict() on Ge must also mark the K-beta escape (E - Ge Kb1) for parents above the edge."""
     from scrappyfit.physics import artefacts
@@ -137,3 +136,33 @@ def test_ge_crystal_gets_kbeta_escape_markers():
         b = beta[0]
         assert b.kind == 'escape' and name in b.label
         assert b.intensity < alpha[0].intensity
+
+
+def test_kbeta_escape_intensity_and_agreement_with_escape_model():
+    """Default beta = 0.133 x alpha; with escape_fraction_beta the GUI's
+    EscapeModel.fraction(beta=True); energy and branching as EscapeModel's;
+    no beta escape on Si."""
+    from scrappyfit.physics import artefacts
+    from scrappyfit.physics.escape import EscapeModel
+    db = Session().db
+    em = EscapeModel(db, 32, 5000.0)
+    assert artefacts.crystal_escape_beta(db, 32) == (em.e_beta, em.ba_beta)
+    assert artefacts.crystal_escape_beta(db, 14) == (0.0, 0.0)
+    y = np.full(4096, 10.0)
+    cal = (0.007, 0.0)
+    areas = {'Zr': 1e6, 'Mo': 1e6}
+    els = [(40, 1), (42, 1)]
+    kw = dict(e_low=0.2, e_high=25.0, areas=areas, crystal_Z=32)
+    for fb in (None, lambda E: em.fraction(E, beta=True)):
+        esc, _, _ = artefacts.predict(db, y, cal, els, escape_fraction=em.fraction,
+                                      escape_fraction_beta=fb, **kw)
+        for name, Z in (('Zr', 40), ('Mo', 42)):
+            E = db.line_energy(Z, 1)
+            a = next(x for x in esc if x.label == name + ' esc')
+            b = next(x for x in esc if x.label == name + ' esc Kb')
+            want = (0.133 * a.intensity if fb is None
+                    else areas[name] * em.fraction(E, beta=True))
+            assert b.intensity == pytest.approx(want, rel=1e-12)
+    si, _, _ = artefacts.predict(db, np.full(4096, 10.0), (0.0016984, -0.37225),
+                                 [(20, 1), (22, 1)], areas={'Ca': 1e5, 'Ti': 2e5})
+    assert si and not any('Kb' in a.label for a in si)
