@@ -6,6 +6,17 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.26.0)
 
+### Maps (map numbers change; no fitted number changes)
+- Smoothed window maps no longer read low on the outer pixels. `analysis/maps.py` `smooth` zero-padded
+  the field, so a flat map read 30 % low on the edge rows, 51 % in the corners and 6 % one pixel in;
+  it now divides by the kernel weight inside the field. On 287424 (Si, raw window, bin 4) the edge
+  rows went from 64 % to 92 % of the interior mean and the corners from 41 % to 85 % (Ag L: 64 -> 92 %,
+  51 -> 104 %) (`D:\Claude gens misc\maps-phase3\edge_check.py`, 2026-10-21). Interior pixels are
+  unchanged. Near the edge this moves window-map values, CSV exports, Profiles traverses on window
+  maps, the default colour limits, and the pixels a percentile mask picks (so the spectrum and fit of
+  a region masked from a map that touches the edge). Edge pixels now average fewer neighbours and are
+  noisier. DA maps and unmasked fits are unaffected.
+
 ## 0.26.0 - 2026-10-21: spectrum display, Sabbatucci-Salvat fetched on first use
 
 ### Fixes

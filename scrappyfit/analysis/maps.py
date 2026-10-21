@@ -47,11 +47,24 @@ def element_map(x, y, e, ch_lo, ch_hi, bg=None, nbin=256, binning=1):
 
 
 def smooth(m, sigma=1.0):
-    """Small Gaussian, for maps that are counting-limited per pixel."""
+    """Small Gaussian, for maps that are counting-limited per pixel.
+
+    Normalised by the kernel weight that lands inside the field, so a pixel
+    on the edge is the Gaussian-weighted mean of its in-field neighbours
+    (fewer of them, so edge pixels are noisier). np.convolve 'same'
+    zero-pads: a flat map came out 30 % low on the edge rows and 51 % low in
+    the corners (smooth(np.ones((64, 64)), 1.0), 2026-10-20), a false dark
+    rim that percentile masks and colour limits then saw.
+    """
     if sigma <= 0:
         return m
     r = int(3 * sigma)
     k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
     k /= k.sum()
-    out = np.apply_along_axis(lambda v: np.convolve(v, k, 'same'), 0, m)
-    return np.apply_along_axis(lambda v: np.convolve(v, k, 'same'), 1, out)
+
+    def conv(a):
+        a = np.apply_along_axis(lambda v: np.convolve(v, k, 'same'), 0, a)
+        return np.apply_along_axis(lambda v: np.convolve(v, k, 'same'), 1, a)
+
+    m = np.asarray(m, dtype=float)
+    return conv(m) / conv(np.ones(m.shape))
