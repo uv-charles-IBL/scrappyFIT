@@ -6,6 +6,11 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.25.0)
 
+### Tests and process
+- GUI journey timing checks allow a fixed 200 ms on top of budget x scale (`JITTER_MS`,
+  `tests/test_gui_journeys.py`). Sub-200 ms steps were failing on disk and scheduler noise
+  (J3.export_yield on CI, J5.open1 on the desktop). No budget value changed; no fitted numbers change.
+
 ## 0.25.0 - 2026-10-21: GUI rework, maps, legend, layered yields; first public release
 
 The public repository starts from a snapshot of this state (2026-10-21). Commit hashes and CI
