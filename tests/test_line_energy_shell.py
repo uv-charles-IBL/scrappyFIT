@@ -72,4 +72,4 @@ def test_predict_escape_for_ag_l_parent_uses_l_alpha():
         db, y, cal, [(47, 2)], e_low=0.2, e_high=6.5, areas={'AgL': 1e6},
         escape_fraction=lambda E: 0.01)
     assert len(esc) == 1
-    assert esc[0].energy == pytest.approx(db.lineE[47]['La_'] - 1.7397, abs=1e-3)
+    assert esc[0].energy == pytest.approx(db.lineE[47]['La_'] - db.lineE[14]['Ka_'], abs=1e-9)

@@ -46,6 +46,8 @@ class Component:
                  beta_tail=1.0, escape=None, tilt_deg=0.0):
         self.name = name
         self.lines = list(lines)          # [(E_keV, relative_intensity), ...]
+        # lines[:n_own] are the element's, the rest its escape lines
+        self.n_own = len(self.lines)
         if escape is not None:
             self.lines += escape.escape_lines(self.lines, tilt_deg=tilt_deg)
         self.tail_amp_fn = tail_amp_fn
@@ -56,13 +58,22 @@ class Component:
         self.response = None
 
     def profile(self, pars, n_channels, do_tail=True):
+        return self._profile_of(self.lines, pars, n_channels, do_tail)
+
+    def escape_profile(self, pars, n_channels, do_tail=True):
+        """The escape lines' share of profile(), for display: profile() is
+        the own lines plus this, to rounding. Zeros without escapes."""
+        return self._profile_of(self.lines[self.n_own:], pars, n_channels,
+                                do_tail)
+
+    def _profile_of(self, lines, pars, n_channels, do_tail):
         f = np.zeros(n_channels)
         if self.response is not None:
             from .hypermet import line_profile as _hyp
-            for E, beta in self.lines:
+            for E, beta in lines:
                 f += _hyp(E, beta, pars, n_channels, self.response)
             return f
-        for E, beta in self.lines:
+        for E, beta in lines:
             ta = self.tail_amp_fn(E) if self.tail_amp_fn else 0.0
             tl = self.tail_len_fn(E) if self.tail_len_fn else 0.0
             f += line_profile(E, beta, pars, n_channels, tail_amp=ta,
@@ -489,6 +500,13 @@ class SubThresholdPileupComponent:
 
 
 class FitResult:
+    #: the fitted components, set by fit_spectrum for display (the summed
+    #: escape spectrum); None on results made elsewhere. Only element
+    #: Components reproduce their profile column; the pile-up components
+    #: are rebuilt between passes and hold their last state, not
+    #: necessarily this result's (use .profiles for those).
+    components = None
+
     def __init__(self, areas, errors, names, chi2, ndf, model, background,
                  pars, profiles):
         self.areas = areas
@@ -500,6 +518,24 @@ class FitResult:
         self.background = background
         self.pars = pars
         self.profiles = profiles
+
+    def escape_spectrum(self):
+        """The fitted escape lines summed over every component (counts per
+        channel), as GeoPIXE's 'Escapes' overlay shows them; None when the
+        fit has no escape lines or no components to take them from.
+
+        GeoPIXE's overlay is the DATA shifted by the escape energy and scaled
+        by the escape fraction (spectrum_display_eventcb.pro:3755-3776); this
+        is the fit's own escape lines, tied to each parent's fitted area.
+        """
+        out, got = np.zeros(len(self.model)), False
+        for c, a in zip(self.components or (), self.areas):
+            if a <= 0 or len(getattr(c, 'lines', ())) <= getattr(
+                    c, 'n_own', len(getattr(c, 'lines', ()))):
+                continue
+            out += a * c.escape_profile(self.pars, len(self.model))
+            got = True
+        return out if got else None
 
     @property
     def reduced_chi2(self):
@@ -926,5 +962,7 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
     if fitted_bg is not None:
         k = components.index(fitted_bg)
         background = A[:, k] * max(float(areas[k]), 0.0)
-    return FitResult(areas, errors, names, chi2, ndf, model, background,
-                     pars, A)
+    res = FitResult(areas, errors, names, chi2, ndf, model, background,
+                    pars, A)
+    res.components = list(components)
+    return res

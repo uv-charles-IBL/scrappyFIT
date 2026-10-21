@@ -413,6 +413,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, '_live_timer', None) is not None:
             self._live_timer.stop()
         self.jobs.shutdown()
+        # a draw queued now would run after the canvases are deleted
+        self.spec.cancel_draws()
+        self.map.cancel_draws()
         log_event('window closed')
         super().closeEvent(ev)
 
@@ -732,6 +735,11 @@ class MainWindow(QtWidgets.QMainWindow):
             'compact: data, fit, background and artefacts. all: every drawn '
             'element component as well. off: no legend.')
         self.cmb_legend.currentTextChanged.connect(self.on_legend)
+        self.btn_lines = QtWidgets.QPushButton('Lines...')
+        self.btn_lines.setToolTip(
+            'Choose which element groups are drawn and listed in the legend. '
+            'The choice is kept across fits; the fit itself is unchanged.')
+        self.btn_lines.clicked.connect(self.on_lines)
         self.chk_field = QtWidgets.QCheckBox('whole field')
         self.chk_field.setToolTip(
             'With a region (mask) active, draw the whole-field spectrum behind '
@@ -761,11 +769,17 @@ class MainWindow(QtWidgets.QMainWindow):
                          'identification, ready for export.')
         b_lab.clicked.connect(self.on_label_peaks)
         b_art = QtWidgets.QPushButton('Show escape + sum peaks')
-        b_art.setToolTip('Mark where silicon escape peaks and pile-up sum '
+        b_art.setToolTip('Mark where detector escape peaks and pile-up sum '
                          'peaks fall. Both put real features where no element '
                          'emits, and a fit offered one will reach for the '
                          'nearest element.')
         b_art.clicked.connect(self.on_artefacts)
+        self.chk_curves = QtWidgets.QCheckBox('escape + pile-up curves')
+        self.chk_curves.setToolTip(
+            "Draw the fit's escape lines and pile-up terms as two summed "
+            "curves, as GeoPIXE's Escapes and Pileup overlays, with or "
+            'without the element components. Display only.')
+        self.chk_curves.toggled.connect(self.spec.set_artefact_curves)
         b_nomark = QtWidgets.QPushButton('Clear markers')
         b_nomark.clicked.connect(self.on_clear_markers)
 
@@ -796,8 +810,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for x in (cb_log, cb_cmp, cb_lab, self.chk_preview, self.chk_id,
                   self.ed_x0, self.ed_x1, self.ed_y1, b_ax, b_axr):
             bar.addWidget(x)
-        for x in (b_full, b_pk, b_lab, b_art, b_nomark,
-                  QtWidgets.QLabel('legend'), self.cmb_legend, self.chk_field):
+        for x in (b_full, b_pk, b_lab, b_art, self.chk_curves, b_nomark,
+                  QtWidgets.QLabel('legend'), self.cmb_legend, self.btn_lines,
+                  self.chk_field):
             bar2.addWidget(x)
         bar.addStretch(1)
         bar2.addStretch(1)
@@ -1265,6 +1280,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spec.legend_mode = mode
         self.sessionChanged.emit()
 
+    def lines_dialog(self):
+        """(dialog, list) choosing the element groups drawn; None before
+        anything is drawn. Split from on_lines so tests can drive it."""
+        groups = self.spec.element_groups()
+        if not groups:
+            return None
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('Lines drawn and listed')
+        v = QtWidgets.QVBoxLayout(dlg)
+        lst = QtWidgets.QListWidget()
+        # wrapped into columns, so 22 groups fit without scrolling
+        lst.setFlow(QtWidgets.QListView.LeftToRight)
+        lst.setWrapping(True)
+        lst.setResizeMode(QtWidgets.QListView.Adjust)
+        lst.setGridSize(QtCore.QSize(80, 22))
+        lst.setMinimumSize(420, 180)
+        for g in groups:
+            it = QtWidgets.QListWidgetItem(g)
+            it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Unchecked if g in self.spec.hidden
+                             else QtCore.Qt.Checked)
+            lst.addItem(it)
+        v.addWidget(lst)
+        row = QtWidgets.QHBoxLayout()
+        for text, state in (('All', QtCore.Qt.Checked),
+                            ('None', QtCore.Qt.Unchecked)):
+            b = QtWidgets.QPushButton(text)
+            b.clicked.connect(lambda _=False, st=state: [
+                lst.item(i).setCheckState(st) for i in range(lst.count())])
+            row.addWidget(b)
+        row.addStretch(1)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        row.addWidget(bb)
+        v.addLayout(row)
+        return dlg, lst
+
+    def apply_lines(self, lst):
+        """Hide the unticked groups of a lines_dialog list. Groups not in
+        this fit keep their earlier choice."""
+        shown = {lst.item(i).text() for i in range(lst.count())}
+        off = {lst.item(i).text() for i in range(lst.count())
+               if lst.item(i).checkState() != QtCore.Qt.Checked}
+        self.spec.set_hidden((self.spec.hidden - shown) | off)
+
+    @user_action
+    def on_lines(self):
+        made = self.lines_dialog()
+        if made is None:
+            self.say('Nothing drawn yet: Lines... chooses among the element '
+                     'groups of the fit or the live estimate.')
+            return
+        dlg, lst = made
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            self.apply_lines(lst)
+
     @user_action
     def on_field_overlay(self, on):
         self.sessionChanged.emit()
@@ -1640,6 +1713,8 @@ class MainWindow(QtWidgets.QMainWindow):
             s.db, s.spectrum, s.cal, els, e_low=o.e_low, e_high=o.e_high,
             areas=s.areas() or None, resolution=res,
             escape_fraction=(em.fraction if em else None),
+            escape_fraction_beta=((lambda E: em.fraction(E, beta=True))
+                                  if em else None),
             crystal_Z=o.crystal_Z)
         crystal = s.db.sym.get(o.crystal_Z, 'Z=%d' % o.crystal_Z)
         e_esc, k_edge = artefacts.crystal_escape(s.db, o.crystal_Z)

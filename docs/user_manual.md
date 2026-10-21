@@ -224,6 +224,15 @@ look first.** A good fit scatters within ±2σ. A localised excursion of 5σ or
 more means something in the model is wrong — and if you add an element to
 absorb it, you have hidden the problem rather than solved it.
 
+Tick **escape + pile-up curves** to draw the fit's escape lines and its pile-up
+terms as two summed curves over the background, as GeoPIXE's Display > Escapes
+and Pileup overlays, with or without the element components. They are the
+fit's own (escape lines tied to each parent's fitted area), where GeoPIXE
+builds its overlays from the measured data. The legend gives their counts
+inside the fit range. The escape curve sums every element's escapes, including
+those of groups hidden with **Lines...**. **Show escape + sum peaks** still
+marks where each escape and sum peak falls, including the Ge K-beta escapes.
+
 Reduced χ² appears in the legend and status bar. Typical values on real
 spectra here are 1.8–2.5; below about 1.5 with high counts usually means you
 have too many free components.
@@ -319,7 +328,13 @@ thresholding an element's map is biased for that element's own line; compare the
 other lines, or cut on half the events and measure on the other half. The
 **legend** box picks what the legend lists: **compact** (data, fit, background,
 pile-up and escape; the default), **all** (every drawn element component too)
-or **off**.
+or **off**. The legend sits to the right of the plot, beside both panels, and
+never over the data: it takes as many columns as its length needs, and the plot
+narrows by its width. In a small window, once it would take more than 40% of the
+width, the last element entries fold into one "+ n more" line. **Lines...**
+picks which element groups (Fe K, Ag L, Ag M, ...) are drawn and listed, with
+All and None buttons; the choice is kept across fits and changes only the
+display, never the fit.
 
 **Why this matters.** The bulk spectrum of a heterogeneous sample describes
 nowhere in it. A real case from the development of this program: a salt-rock

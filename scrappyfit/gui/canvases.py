@@ -16,8 +16,12 @@ Two interactions matter enough to build in:
                          sample describes nowhere in it.
 """
 
+import math
+import re
+
 import numpy as np
 from matplotlib import colors as mcolors
+from matplotlib.lines import Line2D
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -48,12 +52,63 @@ COMP_CYCLE = ['#1F4FD8', '#E07A00', '#7B3FA8', '#00873E', '#C4187A',
 
 REF = '#8C9AAE'           # the whole-field spectrum drawn behind a region's
 
+
+def is_pileup(name):
+    """The pile-up terms of a fit: 'pileup' (sum peaks), 'pileup flat' /
+    'pileup ...' (plateau) and 'subthreshold pileup'."""
+    return name.startswith('pileup') or name == 'subthreshold pileup'
+
 #: Legend modes. 'compact' keeps data, fit, background and artefacts; 'all'
 #: adds every drawn element component; 'off' draws none.
 LEGEND_MODES = ('compact', 'all', 'off')
 
+#: Figure fractions of the spectrum axes when no legend takes room.
+AX_RIGHT, AX_TOP, AX_BOTTOM = 0.98, 0.94, 0.11
+#: The legend sits right of the axes and may take at most this share of the
+#: canvas width; entries past that are summarised in one '+ n more' line.
+LEGEND_MAX_FRAC = 0.4
 
-class SpectrumCanvas(FigureCanvasQTAgg):
+# '<symbol><shell>' as Session names components: 'Fe' (K), 'FeKb', 'FeL',
+# 'AgM5', 'AgMz'. Pile-up, escape and background names are lower case.
+_COMP_RE = re.compile(r'^([A-Z][a-z]?)(Kb|L|M[1-5z]?)?$')
+
+
+def element_group(name):
+    """'Fe K' for 'Fe' and 'FeKb', 'Ag M' for 'AgM5', None for anything
+    that is not an element component (pile-up, escape, background)."""
+    m = _COMP_RE.match(name)
+    if m is None:
+        return None
+    return '%s %s' % (m.group(1), (m.group(2) or 'K')[0])
+
+
+class _Canvas(FigureCanvasQTAgg):
+    """A Qt canvas that is safe to draw on after its widget is gone.
+
+    draw_idle queues _draw_idle on the event loop, and the toolbar sets a
+    wait cursor around each draw (backend_bases _wait_cursor_for_draw_cm).
+    With the C++ widget gone by then, that set_cursor printed 'wrapped
+    C/C++ object of type SpectrumCanvas has been deleted' (fast suite,
+    2026-10-21; how it went mid-draw was not reproduced).
+    cancel_draws() drops a queued draw; drawing and the cursor are no-ops
+    once the widget is deleted.
+    """
+
+    def cancel_draws(self):
+        self._draw_pending = False
+
+    def _draw_idle(self):
+        if sip.isdeleted(self):
+            self._draw_pending = False
+            return
+        super()._draw_idle()
+
+    def set_cursor(self, cursor):
+        if not sip.isdeleted(self):
+            super().set_cursor(cursor)
+
+
+class SpectrumCanvas(_Canvas):
     """Spectrum with the fitted model, components and a residual panel."""
 
     rangeSelected = QtCore.pyqtSignal(float, float)
@@ -69,12 +124,18 @@ class SpectrumCanvas(FigureCanvasQTAgg):
         self.fig.subplots_adjust(left=0.09, right=0.98, top=0.94, bottom=0.11)
         self._log = True
         self._show_comps = True
+        self._artefact_curves = False   # summed escape, pile-up curves
         self.legend_mode = 'compact'
+        self.hidden = set()     # element groups not drawn ('Fe K', 'Ag M')
+        self._legend_layout = {}    # (size, entries) -> (kept, columns)
         self._labels = []
         self._markers = []      # identification markers, drawn over the data
         self._span = SpanSelector(
             self.ax, self._on_span, 'horizontal', useblit=True,
             props=dict(alpha=0.2, facecolor='#2B6CB0'), interactive=False)
+        # the legend's columns depend on the canvas height, so a resize
+        # lays it out again
+        self.mpl_connect('resize_event', lambda ev: self._place_legend())
 
     def _on_span(self, lo, hi):
         if hi > lo:
@@ -88,11 +149,36 @@ class SpectrumCanvas(FigureCanvasQTAgg):
         self._show_comps = bool(on)
         self.redraw()
 
+    def set_artefact_curves(self, on):
+        """Draw the fit's escape lines and pile-up terms as two summed
+        curves, 'escapes' and 'pile-up', as GeoPIXE overlays its 'Escapes'
+        and 'Pileup' spectra (spectrum_display_eventcb.pro:3452, :3780).
+        Drawn with or without the element components; display only."""
+        self._artefact_curves = bool(on)
+        self.redraw()
+
     def set_legend(self, mode):
         if mode not in LEGEND_MODES:
             raise ValueError('legend mode %r not in %s' % (mode, LEGEND_MODES))
         self.legend_mode = mode
         self.redraw()
+
+    def set_hidden(self, groups):
+        """Element groups ('Fe K', 'Ag M', as element_groups() names them)
+        whose components are neither drawn nor listed. Kept across fits, so
+        a refit keeps the selection; names not in the fit are ignored."""
+        self.hidden = set(groups)
+        self.redraw()
+
+    def element_groups(self):
+        """The current fit's element groups, in fit order."""
+        r = (getattr(self, '_state', None) or {}).get('fit')
+        out = []
+        for nm in getattr(r, 'names', ()):
+            g = element_group(nm)
+            if g is not None and g not in out:
+                out.append(g)
+        return out
 
     def set_markers(self, markers):
         """Vertical guides at identified line energies.
@@ -136,6 +222,7 @@ class SpectrumCanvas(FigureCanvasQTAgg):
         r, bk = st['fit'], st['background']
         self.ax.clear()
         self.axr.clear()
+        self._legend_items = None
 
         ref = st.get('reference')
         if ref is not None:
@@ -158,6 +245,8 @@ class SpectrumCanvas(FigureCanvasQTAgg):
                         continue
                     c = r.profiles[:n, i] * r.areas[i]
                     special = nm in ARTEFACT_STYLE
+                    if self._artefact_curves and is_pileup(nm):
+                        continue            # drawn summed, below
                     # Elements are hidden below 0.3% of the tallest peak, or
                     # a busy spectrum turns into spaghetti. Artefacts are NOT
                     # subject to that: pile-up on run 287427 is 58 counts
@@ -167,6 +256,12 @@ class SpectrumCanvas(FigureCanvasQTAgg):
                     # assigning a real element to a sum peak. GeoPIXE shows
                     # its 'sum' pseudo-element for the same reason.
                     if not special and c.max() < 0.003 * max(y.max(), 1):
+                        continue
+                    grp = element_group(nm)
+                    if grp in self.hidden:
+                        # keep its palette slot, so hiding one element does
+                        # not recolour the others
+                        k += not special
                         continue
                     if special:
                         col, ls, lw = ARTEFACT_STYLE[nm]
@@ -179,8 +274,13 @@ class SpectrumCanvas(FigureCanvasQTAgg):
                         k += 1
                         lab = ('%s (%.0f counts)' % (nm, r.areas[i])
                                if self.legend_mode == 'all' else None)
-                        self.ax.plot(E[:n], c + base, lw=1.0, alpha=0.75,
-                                     color=col, label=lab)
+                        ln, = self.ax.plot(E[:n], c + base, lw=1.0,
+                                           alpha=0.75, color=col, label=lab)
+                        # the legend may fold elements into '+ n more';
+                        # other components (pile-up plateau) always show
+                        ln._sf_element = grp is not None
+            if self._artefact_curves:
+                self._draw_artefact_curves(r, E, n, bk, st.get('xlim'))
             # the model is drawn LAST so it is never buried under a component
             self.ax.plot(E[:n], r.model[:n], lw=1.8, color=MODEL, zorder=4,
                          label='fit  chi2r=%.2f' % r.reduced_chi2)
@@ -250,11 +350,109 @@ class SpectrumCanvas(FigureCanvasQTAgg):
         self.ax.grid(alpha=0.2, lw=0.5)
         self.axr.grid(alpha=0.25, lw=0.5)
         if self.legend_mode != 'off':
-            self.ax.legend(fontsize=8, frameon=False, loc='upper right')
+            self._legend_items = self.ax.get_legend_handles_labels()
+        self._place_legend(draw=False)
         if st['title']:
             self.ax.set_title(st['title'], fontsize=10, color=INK)
         self.ax.tick_params(labelbottom=False)
         self.draw_idle()
+
+    def _draw_artefact_curves(self, r, E, n, bk, xlim):
+        """Summed escape and pile-up spectra over the background. The
+        counts in the legend are those inside xlim (the fit window), not
+        the whole spectrum the curve is drawn over."""
+        lo, hi = xlim or (float(E[0]), float(E[n - 1]))
+        win = (E[:n] >= lo) & (E[:n] <= hi)
+        base = bk[:n] if bk is not None else 0.0
+        esc = getattr(r, 'escape_spectrum', None)
+        esc = esc() if callable(esc) else None
+        pile = [i for i, nm in enumerate(r.names)
+                if is_pileup(nm) and r.areas[i] > 0]
+        for curve, nm, what in (
+                (esc[:n] if esc is not None else None, 'escape', 'escapes'),
+                (sum(r.profiles[:n, i] * r.areas[i] for i in pile)
+                 if pile else None, 'pileup', 'pile-up')):
+            if curve is None:
+                continue
+            col, ls, lw = ARTEFACT_STYLE[nm]
+            self.ax.plot(E[:n], curve + base, lw=lw + 0.2, ls=ls, color=col,
+                         alpha=0.95, zorder=3,
+                         label='%s (fit, %.0f counts)' % (what,
+                                                          curve[win].sum()))
+
+    def _place_legend(self, draw=True):
+        """Put the legend right of the axes, never over the data.
+
+        It runs from the top of the spectrum down beside the residuals, in
+        as many columns as that height needs (22 element groups on 287424
+        ran off the plot in one), and the axes give up exactly its width.
+        Past LEGEND_MAX_FRAC of the canvas, the remaining element entries
+        become one '+ n more' line; Lines... chooses what is listed.
+        """
+        leg = self.ax.get_legend()
+        if leg is not None:
+            leg.remove()
+        items = getattr(self, '_legend_items', None)
+        if not items or not items[0]:
+            self.fig.subplots_adjust(right=AX_RIGHT)
+            if draw:
+                self.draw_idle()
+            return
+        handles, labels = list(items[0]), list(items[1])
+        W, H = self.fig.bbox.width, self.fig.bbox.height
+        if W < 2 or H < 2:                 # collapsed; laid out on resize
+            return
+        rend = self.get_renderer()
+        fixed = [k for k, h in enumerate(handles)
+                 if getattr(h, '_sf_element', False) is False]
+        extra = [k for k in range(len(handles)) if k not in fixed]
+
+        def make(keep, ncol=None):
+            idx = fixed + extra[:keep]
+            hs, ls = [handles[k] for k in idx], [labels[k] for k in idx]
+            if keep < len(extra):
+                hs.append(Line2D([], [], lw=0))
+                ls.append('+ %d more (Lines...)' % (len(extra) - keep))
+            if ncol is None:
+                # one column first, to measure a row
+                lg = self.ax.legend(hs, ls, fontsize=8, frameon=False)
+                one = lg.get_window_extent(rend).height / max(len(hs), 1)
+                rows = max(int((AX_TOP - AX_BOTTOM) * H / max(one, 1.0)), 1)
+                lg.remove()
+                ncol = math.ceil(len(hs) / rows)
+            lg = self.ax.legend(hs, ls, fontsize=8, frameon=False,
+                                loc='upper left', borderaxespad=0.0,
+                                ncol=ncol, bbox_to_anchor=(1.0, AX_TOP),
+                                bbox_transform=self.fig.transFigure)
+            return lg, ncol
+
+        # Measuring is most of a redraw's legend cost, so the layout found
+        # for a canvas size and set of entries is reused.
+        key = (W, H, tuple(labels), tuple(fixed))
+        hit = self._legend_layout.get(key)
+        if hit is not None:
+            keep, ncol = hit
+            lg, _ = make(keep, ncol)
+            w = lg.get_window_extent(rend).width
+        else:
+            keep = len(extra)
+            lg, ncol = make(keep)
+            w = lg.get_window_extent(rend).width
+            while w > LEGEND_MAX_FRAC * W and keep > 0:
+                keep = keep * 2 // 3
+                lg.remove()
+                lg, ncol = make(keep)
+                w = lg.get_window_extent(rend).width
+            if len(self._legend_layout) > 32:
+                self._legend_layout.clear()
+            self._legend_layout[key] = (keep, ncol)
+        pad = 8.0                          # px between the axes and legend
+        right = max(1.0 - (w + 2 * pad) / W, 0.3)
+        self.fig.subplots_adjust(right=right)
+        lg.set_bbox_to_anchor((right + pad / W, AX_TOP),
+                              transform=self.fig.transFigure)
+        if draw:
+            self.draw_idle()
 
     def set_xlim(self, lo, hi):
         self.ax.set_xlim(lo, hi)
@@ -284,7 +482,7 @@ MAP_BAR_PX = 90
 MAP_PCT = (2.0, 99.0)
 
 
-class MapCanvas(FigureCanvasQTAgg):
+class MapCanvas(_Canvas):
     """An elemental map, with rectangle selection that becomes a mask."""
 
     regionSelected = QtCore.pyqtSignal(object)     # bool array, map-shaped
