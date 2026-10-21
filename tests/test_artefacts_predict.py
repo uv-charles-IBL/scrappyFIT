@@ -60,8 +60,8 @@ def test_predict_escape_markers_follow_ge_crystal():
             db.line_energy(Z, 1) - artefacts.SI_KA, abs=1e-3)
 
 
-def test_predict_si_unchanged_and_other_crystals_have_no_escapes():
-    """crystal_Z=14 must give exactly the markers the Si-only code gave; a
+def test_predict_si_default_and_other_crystals_have_no_escapes():
+    """crystal_Z=14 must give the default (Si) markers, at the db Si Ka_; a
     crystal escape_energy.pro does not know (here Cd) gets none, not Si's."""
     from scrappyfit.physics import artefacts
     db = Session().db
@@ -76,15 +76,16 @@ def test_predict_si_unchanged_and_other_crystals_have_no_escapes():
         [(a.label, a.energy, a.intensity) for a in old]
     for a in si:
         E = db.line_energy({'Ca': 20, 'Ti': 22}[a.parents[0]], 1)
-        assert a.energy == E - 1.7397
-    # pinned from master eaea2c1 (Si-only predict), 2026-10-19
-    assert [(a.label, round(a.energy, 4), round(a.intensity, 6)) for a in si]         == [('Ca esc', 1.9503, 175.319154), ('Ti esc', 2.7683, 212.552153)]
+        assert a.energy == E - db.lineE[14]['Ka_']
+    # pinned from master eaea2c1 (Si-only predict), 2026-10-19; energies
+    # re-pinned 2026-10-21 (fix/spectrum-display): db Si Ka_ 1.740, not
+    # 1.7397, moves each Si escape marker down 0.3 eV; counts unchanged
+    assert [(a.label, round(a.energy, 4), round(a.intensity, 6)) for a in si]         == [('Ca esc', 1.95, 175.319154), ('Ti esc', 2.768, 212.552153)]
 
     cd, _, _ = artefacts.predict(db, y, cal, els, areas=areas, crystal_Z=48)
     assert cd == []
 
 
-@pytest.mark.xfail(strict=True, reason='BUGS.md: Si escape markers use 1.7397 keV, the fit 1.740')
 def test_si_escape_markers_use_the_fit_escape_energy():
     """artefacts SI_KA/SI_K_EDGE must equal EscapeModel's e_alpha/k_edge (db Si Ka_, edge)."""
     from scrappyfit.physics import artefacts

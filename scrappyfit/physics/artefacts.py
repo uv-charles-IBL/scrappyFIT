@@ -16,7 +16,7 @@ Escape peaks
 A photon absorbed in the crystal can eject the crystal's own K X-ray, which
 then leaves it. The event records low by exactly the escape energy:
 
-    E_escape = E - 1.7397 keV        (Si Ka)
+    E_escape = E - 1.740 keV         (Si Ka_, from the database)
     E_escape = E - 9.885 keV         (Ge Ka1, from the database)
 
 Only possible above the crystal's K edge - 1.839 keV on Si, so there are no
@@ -42,20 +42,23 @@ feature about sqrt(2) times too wide for its energy is probably a sum.
 
 import numpy as np
 
-SI_KA = 1.7397          # keV, the escape energy on a silicon detector
+# Fallbacks only: crystal_escape() reads both from the database, as
+# EscapeModel does, so the markers sit on the fitted escape lines.
+SI_KA = 1.740           # keV, db Si Ka_ (escape_energy.pro:21)
 SI_K_EDGE = 1.8389      # keV, below which no escape is possible
 
 
 def crystal_escape(db, crystal_Z):
     """(escape energy, K edge) in keV for the detector crystal.
 
-    Follows escape_energy.pro: Ge escapes its Ka1, Si its Ka; every other
-    crystal returns (0, 0), meaning no escape peaks. Silicon keeps this
-    module's own SI_KA and SI_K_EDGE so its markers do not move.
+    Follows escape_energy.pro: Ge escapes its Ka1, Si its Ka_ (:21); every
+    other crystal returns (0, 0), meaning no escape peaks. The lookups are
+    EscapeModel's, so markers and the fitted escape lines cannot disagree.
     """
     Z = int(crystal_Z)
     if Z == 14:
-        return SI_KA, SI_K_EDGE
+        return (db.lineE.get(14, {}).get('Ka_', SI_KA),
+                db.edge.get((14, 'K'), SI_K_EDGE))
     if Z == 32:
         # same lookup and fallback as EscapeModel, so markers and the
         # fitted escape lines cannot disagree
