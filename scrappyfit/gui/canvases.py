@@ -16,8 +16,12 @@ Two interactions matter enough to build in:
                          sample describes nowhere in it.
 """
 
+import math
+import re
+
 import numpy as np
 from matplotlib import colors as mcolors
+from matplotlib.lines import Line2D
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
 from matplotlib.figure import Figure
@@ -51,6 +55,25 @@ REF = '#8C9AAE'           # the whole-field spectrum drawn behind a region's
 #: Legend modes. 'compact' keeps data, fit, background and artefacts; 'all'
 #: adds every drawn element component; 'off' draws none.
 LEGEND_MODES = ('compact', 'all', 'off')
+
+#: Figure fractions of the spectrum axes when no legend takes room.
+AX_RIGHT, AX_TOP, AX_BOTTOM = 0.98, 0.94, 0.11
+#: The legend sits right of the axes and may take at most this share of the
+#: canvas width; entries past that are summarised in one '+ n more' line.
+LEGEND_MAX_FRAC = 0.4
+
+# '<symbol><shell>' as Session names components: 'Fe' (K), 'FeKb', 'FeL',
+# 'AgM5', 'AgMz'. Pile-up, escape and background names are lower case.
+_COMP_RE = re.compile(r'^([A-Z][a-z]?)(Kb|L|M[1-5z]?)?$')
+
+
+def element_group(name):
+    """'Fe K' for 'Fe' and 'FeKb', 'Ag M' for 'AgM5', None for anything
+    that is not an element component (pile-up, escape, background)."""
+    m = _COMP_RE.match(name)
+    if m is None:
+        return None
+    return '%s %s' % (m.group(1), (m.group(2) or 'K')[0])
 
 
 class _Canvas(FigureCanvasQTAgg):
@@ -96,11 +119,16 @@ class SpectrumCanvas(_Canvas):
         self._log = True
         self._show_comps = True
         self.legend_mode = 'compact'
+        self.hidden = set()     # element groups not drawn ('Fe K', 'Ag M')
+        self._legend_layout = {}    # (size, entries) -> (kept, columns)
         self._labels = []
         self._markers = []      # identification markers, drawn over the data
         self._span = SpanSelector(
             self.ax, self._on_span, 'horizontal', useblit=True,
             props=dict(alpha=0.2, facecolor='#2B6CB0'), interactive=False)
+        # the legend's columns depend on the canvas height, so a resize
+        # lays it out again
+        self.mpl_connect('resize_event', lambda ev: self._place_legend())
 
     def _on_span(self, lo, hi):
         if hi > lo:
@@ -119,6 +147,23 @@ class SpectrumCanvas(_Canvas):
             raise ValueError('legend mode %r not in %s' % (mode, LEGEND_MODES))
         self.legend_mode = mode
         self.redraw()
+
+    def set_hidden(self, groups):
+        """Element groups ('Fe K', 'Ag M', as element_groups() names them)
+        whose components are neither drawn nor listed. Kept across fits, so
+        a refit keeps the selection; names not in the fit are ignored."""
+        self.hidden = set(groups)
+        self.redraw()
+
+    def element_groups(self):
+        """The current fit's element groups, in fit order."""
+        r = (getattr(self, '_state', None) or {}).get('fit')
+        out = []
+        for nm in getattr(r, 'names', ()):
+            g = element_group(nm)
+            if g is not None and g not in out:
+                out.append(g)
+        return out
 
     def set_markers(self, markers):
         """Vertical guides at identified line energies.
@@ -162,6 +207,7 @@ class SpectrumCanvas(_Canvas):
         r, bk = st['fit'], st['background']
         self.ax.clear()
         self.axr.clear()
+        self._legend_items = None
 
         ref = st.get('reference')
         if ref is not None:
@@ -194,6 +240,12 @@ class SpectrumCanvas(_Canvas):
                     # its 'sum' pseudo-element for the same reason.
                     if not special and c.max() < 0.003 * max(y.max(), 1):
                         continue
+                    grp = element_group(nm)
+                    if grp in self.hidden:
+                        # keep its palette slot, so hiding one element does
+                        # not recolour the others
+                        k += not special
+                        continue
                     if special:
                         col, ls, lw = ARTEFACT_STYLE[nm]
                         self.ax.plot(E[:n], c + base, lw=lw, ls=ls,
@@ -205,8 +257,11 @@ class SpectrumCanvas(_Canvas):
                         k += 1
                         lab = ('%s (%.0f counts)' % (nm, r.areas[i])
                                if self.legend_mode == 'all' else None)
-                        self.ax.plot(E[:n], c + base, lw=1.0, alpha=0.75,
-                                     color=col, label=lab)
+                        ln, = self.ax.plot(E[:n], c + base, lw=1.0,
+                                           alpha=0.75, color=col, label=lab)
+                        # the legend may fold elements into '+ n more';
+                        # other components (pile-up plateau) always show
+                        ln._sf_element = grp is not None
             # the model is drawn LAST so it is never buried under a component
             self.ax.plot(E[:n], r.model[:n], lw=1.8, color=MODEL, zorder=4,
                          label='fit  chi2r=%.2f' % r.reduced_chi2)
@@ -276,11 +331,86 @@ class SpectrumCanvas(_Canvas):
         self.ax.grid(alpha=0.2, lw=0.5)
         self.axr.grid(alpha=0.25, lw=0.5)
         if self.legend_mode != 'off':
-            self.ax.legend(fontsize=8, frameon=False, loc='upper right')
+            self._legend_items = self.ax.get_legend_handles_labels()
+        self._place_legend(draw=False)
         if st['title']:
             self.ax.set_title(st['title'], fontsize=10, color=INK)
         self.ax.tick_params(labelbottom=False)
         self.draw_idle()
+
+    def _place_legend(self, draw=True):
+        """Put the legend right of the axes, never over the data.
+
+        It runs from the top of the spectrum down beside the residuals, in
+        as many columns as that height needs (22 element groups on 287424
+        ran off the plot in one), and the axes give up exactly its width.
+        Past LEGEND_MAX_FRAC of the canvas, the remaining element entries
+        become one '+ n more' line; Lines... chooses what is listed.
+        """
+        leg = self.ax.get_legend()
+        if leg is not None:
+            leg.remove()
+        items = getattr(self, '_legend_items', None)
+        if not items or not items[0]:
+            self.fig.subplots_adjust(right=AX_RIGHT)
+            if draw:
+                self.draw_idle()
+            return
+        handles, labels = list(items[0]), list(items[1])
+        W, H = self.fig.bbox.width, self.fig.bbox.height
+        if W < 2 or H < 2:                 # collapsed; laid out on resize
+            return
+        rend = self.get_renderer()
+        fixed = [k for k, h in enumerate(handles)
+                 if getattr(h, '_sf_element', False) is False]
+        extra = [k for k in range(len(handles)) if k not in fixed]
+
+        def make(keep, ncol=None):
+            idx = fixed + extra[:keep]
+            hs, ls = [handles[k] for k in idx], [labels[k] for k in idx]
+            if keep < len(extra):
+                hs.append(Line2D([], [], lw=0))
+                ls.append('+ %d more (Lines...)' % (len(extra) - keep))
+            if ncol is None:
+                # one column first, to measure a row
+                lg = self.ax.legend(hs, ls, fontsize=8, frameon=False)
+                one = lg.get_window_extent(rend).height / max(len(hs), 1)
+                rows = max(int((AX_TOP - AX_BOTTOM) * H / max(one, 1.0)), 1)
+                lg.remove()
+                ncol = math.ceil(len(hs) / rows)
+            lg = self.ax.legend(hs, ls, fontsize=8, frameon=False,
+                                loc='upper left', borderaxespad=0.0,
+                                ncol=ncol, bbox_to_anchor=(1.0, AX_TOP),
+                                bbox_transform=self.fig.transFigure)
+            return lg, ncol
+
+        # Measuring is most of a redraw's legend cost, so the layout found
+        # for a canvas size and set of entries is reused.
+        key = (W, H, tuple(labels), tuple(fixed))
+        hit = self._legend_layout.get(key)
+        if hit is not None:
+            keep, ncol = hit
+            lg, _ = make(keep, ncol)
+            w = lg.get_window_extent(rend).width
+        else:
+            keep = len(extra)
+            lg, ncol = make(keep)
+            w = lg.get_window_extent(rend).width
+            while w > LEGEND_MAX_FRAC * W and keep > 0:
+                keep = keep * 2 // 3
+                lg.remove()
+                lg, ncol = make(keep)
+                w = lg.get_window_extent(rend).width
+            if len(self._legend_layout) > 32:
+                self._legend_layout.clear()
+            self._legend_layout[key] = (keep, ncol)
+        pad = 8.0                          # px between the axes and legend
+        right = max(1.0 - (w + 2 * pad) / W, 0.3)
+        self.fig.subplots_adjust(right=right)
+        lg.set_bbox_to_anchor((right + pad / W, AX_TOP),
+                              transform=self.fig.transFigure)
+        if draw:
+            self.draw_idle()
 
     def set_xlim(self, lo, hi):
         self.ax.set_xlim(lo, hi)

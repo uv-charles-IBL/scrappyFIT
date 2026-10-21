@@ -319,7 +319,13 @@ thresholding an element's map is biased for that element's own line; compare the
 other lines, or cut on half the events and measure on the other half. The
 **legend** box picks what the legend lists: **compact** (data, fit, background,
 pile-up and escape; the default), **all** (every drawn element component too)
-or **off**.
+or **off**. The legend sits to the right of the plot, beside both panels, and
+never over the data: it takes as many columns as its length needs, and the plot
+narrows by its width. In a small window, once it would take more than 40% of the
+width, the last element entries fold into one "+ n more" line. **Lines...**
+picks which element groups (Fe K, Ag L, Ag M, ...) are drawn and listed, with
+All and None buttons; the choice is kept across fits and changes only the
+display, never the fit.
 
 **Why this matters.** The bulk spectrum of a heterogeneous sample describes
 nowhere in it. A real case from the development of this program: a salt-rock

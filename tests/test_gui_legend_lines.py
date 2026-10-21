@@ -60,16 +60,12 @@ HIDDEN = {'Fe K', 'Ag M'}
 HIDDEN_COMPS = {'Fe', 'FeKb', 'AgM5', 'AgM4'}
 
 
-@pytest.mark.xfail(strict=True, reason='BUGS.md: Choose which lines are '
-                   'drawn and listed in the spectrum legend')
 def test_element_groups_lists_groups_in_first_appearance_order(canvas):
     """element_groups() must name '<Sym> <shell>' groups, no artefacts."""
     _show(canvas)
     assert canvas.element_groups() == GROUPS
 
 
-@pytest.mark.xfail(strict=True, reason='BUGS.md: Choose which lines are '
-                   'drawn and listed in the spectrum legend')
 def test_hidden_groups_are_not_drawn_or_listed(canvas):
     """set_hidden() must drop the group's lines and legend entries."""
     _show(canvas)
@@ -84,8 +80,6 @@ def test_hidden_groups_are_not_drawn_or_listed(canvas):
     assert 'pileup' in toks
 
 
-@pytest.mark.xfail(strict=True, reason='BUGS.md: Choose which lines are '
-                   'drawn and listed in the spectrum legend')
 def test_hidden_groups_survive_a_new_show_and_ignore_unknown(canvas):
     """The hidden set must persist across show(); unknown names are ignored."""
     _show(canvas)
@@ -96,8 +90,6 @@ def test_hidden_groups_survive_a_new_show_and_ignore_unknown(canvas):
     assert 'Ca' in _tokens(canvas)
 
 
-@pytest.mark.xfail(strict=True, reason='BUGS.md: Choose which lines are '
-                   'drawn and listed in the spectrum legend')
 def test_legend_all_with_22_groups_stays_beside_the_axes(canvas):
     """The 'all' legend must not cover the data or run off the canvas."""
     canvas.resize(1000, 600)
@@ -124,3 +116,66 @@ def test_compact_legend_has_no_elements_and_off_has_none(canvas):
     assert not {'Fe', 'Ca', 'AgM5'} & set(toks), toks
     canvas.set_legend('off')
     assert canvas.ax.get_legend() is None
+
+
+def test_lines_dialog_hides_unticked_groups_and_keeps_others(qtbot):
+    """Lines...: unticking a group hides it; groups not in this fit keep
+    their earlier choice; nothing to choose before anything is drawn."""
+    from PyQt5 import QtCore
+    from scrappyfit.gui.app import MainWindow
+    w = MainWindow()
+    qtbot.addWidget(w)
+    try:
+        assert w.lines_dialog() is None
+        _show(w.spec)
+        w.spec.hidden = {'Xx K'}
+        dlg, lst = w.lines_dialog()
+        assert [lst.item(i).text() for i in range(lst.count())] == GROUPS
+        for i in range(lst.count()):
+            if lst.item(i).text() in HIDDEN:
+                lst.item(i).setCheckState(QtCore.Qt.Unchecked)
+        w.apply_lines(lst)
+        assert w.spec.hidden == HIDDEN | {'Xx K'}
+        assert not HIDDEN_COMPS & set(_tokens(w.spec))
+        dlg.close()
+    finally:
+        w.close()
+
+
+def test_small_canvas_folds_elements_into_more_and_off_restores_axes(canvas):
+    """At 700x400 the 22 groups cannot fit in 40% of the width: the legend
+    folds the rest into '+ n more', stays on the canvas and off the axes;
+    'off' gives the axes their full width back."""
+    from scrappyfit.gui.canvases import AX_RIGHT, LEGEND_MAX_FRAC
+    canvas.resize(700, 400)
+    canvas.fig.set_size_inches(7, 4)
+    _show(canvas)
+    canvas.set_legend('all')
+    canvas.draw()
+    rend = canvas.get_renderer()
+    leg = canvas.ax.get_legend()
+    texts = [t.get_text() for t in leg.get_texts()]
+    assert texts[-1].startswith('+ ') and 'more' in texts[-1], texts
+    for nm in ('data', 'background', 'pileup', 'fit'):
+        assert any(t.startswith(nm) for t in texts), (nm, texts)
+    lb = leg.get_window_extent(rend)
+    assert lb.x0 >= canvas.ax.get_window_extent(rend).x1 - 1
+    assert lb.x1 <= canvas.fig.bbox.x1 + 1 and lb.y0 >= canvas.fig.bbox.y0 - 1
+    assert lb.width <= LEGEND_MAX_FRAC * canvas.fig.bbox.width + 1
+    canvas.set_legend('off')
+    assert canvas.fig.subplotpars.right == AX_RIGHT
+
+
+def test_hiding_a_group_keeps_the_other_colours(canvas):
+    """Hiding Fe must not recolour the elements drawn after it."""
+    _show(canvas)
+    canvas.set_legend('all')
+
+    def colours():
+        return {l.get_label().split(' ')[0]: l.get_color()
+                for l in canvas.ax.get_lines()}
+    before = colours()
+    canvas.set_hidden({'Fe K'})
+    after = colours()
+    for nm in ('Co', 'Zn', 'AgL', 'PbM4'):
+        assert after[nm] == before[nm], nm

@@ -732,6 +732,11 @@ class MainWindow(QtWidgets.QMainWindow):
             'compact: data, fit, background and artefacts. all: every drawn '
             'element component as well. off: no legend.')
         self.cmb_legend.currentTextChanged.connect(self.on_legend)
+        self.btn_lines = QtWidgets.QPushButton('Lines...')
+        self.btn_lines.setToolTip(
+            'Choose which element groups are drawn and listed in the legend. '
+            'The choice is kept across fits; the fit itself is unchanged.')
+        self.btn_lines.clicked.connect(self.on_lines)
         self.chk_field = QtWidgets.QCheckBox('whole field')
         self.chk_field.setToolTip(
             'With a region (mask) active, draw the whole-field spectrum behind '
@@ -797,7 +802,8 @@ class MainWindow(QtWidgets.QMainWindow):
                   self.ed_x0, self.ed_x1, self.ed_y1, b_ax, b_axr):
             bar.addWidget(x)
         for x in (b_full, b_pk, b_lab, b_art, b_nomark,
-                  QtWidgets.QLabel('legend'), self.cmb_legend, self.chk_field):
+                  QtWidgets.QLabel('legend'), self.cmb_legend, self.btn_lines,
+                  self.chk_field):
             bar2.addWidget(x)
         bar.addStretch(1)
         bar2.addStretch(1)
@@ -1204,6 +1210,64 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_legend(self, mode):
         self.spec.legend_mode = mode
         self.sessionChanged.emit()
+
+    def lines_dialog(self):
+        """(dialog, list) choosing the element groups drawn; None before
+        anything is drawn. Split from on_lines so tests can drive it."""
+        groups = self.spec.element_groups()
+        if not groups:
+            return None
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle('Lines drawn and listed')
+        v = QtWidgets.QVBoxLayout(dlg)
+        lst = QtWidgets.QListWidget()
+        # wrapped into columns, so 22 groups fit without scrolling
+        lst.setFlow(QtWidgets.QListView.LeftToRight)
+        lst.setWrapping(True)
+        lst.setResizeMode(QtWidgets.QListView.Adjust)
+        lst.setGridSize(QtCore.QSize(80, 22))
+        lst.setMinimumSize(420, 180)
+        for g in groups:
+            it = QtWidgets.QListWidgetItem(g)
+            it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+            it.setCheckState(QtCore.Qt.Unchecked if g in self.spec.hidden
+                             else QtCore.Qt.Checked)
+            lst.addItem(it)
+        v.addWidget(lst)
+        row = QtWidgets.QHBoxLayout()
+        for text, state in (('All', QtCore.Qt.Checked),
+                            ('None', QtCore.Qt.Unchecked)):
+            b = QtWidgets.QPushButton(text)
+            b.clicked.connect(lambda _=False, st=state: [
+                lst.item(i).setCheckState(st) for i in range(lst.count())])
+            row.addWidget(b)
+        row.addStretch(1)
+        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok
+                                        | QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        row.addWidget(bb)
+        v.addLayout(row)
+        return dlg, lst
+
+    def apply_lines(self, lst):
+        """Hide the unticked groups of a lines_dialog list. Groups not in
+        this fit keep their earlier choice."""
+        shown = {lst.item(i).text() for i in range(lst.count())}
+        off = {lst.item(i).text() for i in range(lst.count())
+               if lst.item(i).checkState() != QtCore.Qt.Checked}
+        self.spec.set_hidden((self.spec.hidden - shown) | off)
+
+    @user_action
+    def on_lines(self):
+        made = self.lines_dialog()
+        if made is None:
+            self.say('Nothing drawn yet: Lines... chooses among the element '
+                     'groups of the fit or the live estimate.')
+            return
+        dlg, lst = made
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            self.apply_lines(lst)
 
     @user_action
     def on_field_overlay(self, on):
