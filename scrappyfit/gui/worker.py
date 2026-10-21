@@ -10,6 +10,11 @@ together.
     is ever worth drawing. A preview running when a fit is submitted is told
     to stop; it does so at its next component (a SNIP background it is
     building finishes first), and the fit starts after it.
+  - A 'fetch' (a download the user agreed to) is never stopped or
+    superseded by a preview: a preview arriving while one is queued is
+    dropped, and one arriving while one runs is queued behind it (where a
+    newer preview still replaces it). A fetch ignores its stop flag, so
+    shutdown() during a download waits for it, up to its timeout.
   - A job dropped from the queue, by cancel() or by a newer submission,
     still gets its on_cancel, so whoever locked the window for it unlocks.
   - `cancel()` asks the running fit or batch to stop. Cancellation is
@@ -40,7 +45,7 @@ _ORPHANS = []       # worker threads that outlived shutdown's wait
 class Job:
     def __init__(self, kind, fn, on_done=None, on_fail=None, on_cancel=None,
                  tag=None):
-        self.kind = kind            # 'fit', 'batch', 'preview'
+        self.kind = kind            # 'fit', 'batch', 'preview', 'fetch'
         self.fn = fn                # fn(ctx) -> result, runs on the worker
         self.on_done = on_done      # called on the GUI thread with the result
         self.on_fail = on_fail
@@ -146,10 +151,16 @@ class JobRunner(QtCore.QObject):
                 # any estimate, so drop this one
                 self._drop(job, '%s running' % cur.kind)
                 return None
+            if self.pending is not None and self.pending.kind != 'preview':
+                # a queued fetch is work the user asked for; the estimate
+                # is the one that gives way
+                self._drop(job, '%s queued' % self.pending.kind)
+                return None
             if self.pending is not None:
                 self._drop(self.pending, 'superseded')
             self.pending = job
-            cur.stop.set()              # the running one is already stale
+            if cur.kind == 'preview':
+                cur.stop.set()          # the running one is already stale
             return job
         # a fit or batch: stop a running preview and go next
         if cur.kind == 'preview':

@@ -30,6 +30,13 @@ from ..physics import lfix
 ROOT = None      # resolved by scrappyfit.config
 DATASETS = ['henke1993', 'sabbatuccisalvat2016', 'ffast', 'mixed']
 
+
+def installed_datasets(db):
+    """DATASETS less any not installed: the Sabbatucci table is not shipped
+    and needs `python -m scrappyfit.io.sabbatucci` first."""
+    return [d for d in DATASETS if db.mac_installed(d)]
+
+
 def load_efficiency(path):
     """Detector efficiency curve from a GeoPIXE EFF3 export."""
     E, f = [], []

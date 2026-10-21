@@ -6,6 +6,15 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.25.0)
 
+- Licence: `MAC_SabbatucciSalvat2016.txt` is no longer in the repository or the wheel. It is
+  converted from EGSnrc's AGPL-3.0 `photo_shellwise.data`, which cannot ship inside an MIT
+  package; v0.25.0 and earlier shipped it, and there it is under AGPL-3.0 (THIRD_PARTY_NOTICES.md).
+  `python -m scrappyfit.io.sabbatucci` (or `fetch()`) downloads EGSnrc's file at a pinned commit
+  and rebuilds the table, byte-identical to v0.25.0's (SHA-256 checked), into `~/.scrappyfit/data`;
+  choosing it in the GUI's MAC box offers that download behind a consent dialog. Selecting
+  `sabbatucci` without it now raises `SabbatucciMissing` saying how to get it. No fitted number
+  changes: `mixed` (the default) never used it, and the fetched table is the same file.
+
 ## 0.25.0 - 2026-10-21: GUI rework, maps, legend, layered yields; first public release
 
 The public repository starts from a snapshot of this state (2026-10-21). Commit hashes and CI

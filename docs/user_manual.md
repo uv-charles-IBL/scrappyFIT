@@ -441,7 +441,7 @@ Selectable at run time. Five choices:
 | `henke1993` | 10 eV – 30 keV | CXRO f2. Full light-element coverage |
 | `ffast` | 10 eV – 30 keV | Chantler, NIST. Full coverage |
 | `xcom` | 1 keV up | Berger & Hubbell. **Nothing below 1 keV** |
-| `sabbatuccisalvat2016` | 1 keV up | **Nothing below 1 keV** |
+| `sabbatuccisalvat2016` | 1 keV up | **Nothing below 1 keV.** Not shipped (EGSnrc data, AGPL-3.0): fetch it first, see below |
 | `mixed` | full | **the default** |
 
 `mixed` implements the rule measured by Heirwegh (2014): **FFAST below each
@@ -461,6 +461,20 @@ Benchmarked here against a quartz sample of exactly known composition
 
 **Do not select Sabbatucci or XCOM for light-element work.** They cannot
 return a value for C, N, O or F at all.
+
+The Sabbatucci-Salvat table is converted from EGSnrc's `photo_shellwise.data`,
+which is AGPL-3.0, so scrappyFIT does not ship it (v0.25.0 was the last
+release that did). Selecting it without the table is an error that says how to
+get it. To install it once, run
+
+```
+python -m scrappyfit.io.sabbatucci
+```
+
+which downloads EGSnrc's file (pinned commit, SHA-256 checked), converts it and
+writes `MAC_SabbatucciSalvat2016.txt` to `~/.scrappyfit/data`
+(`SCRAPPYFIT_DATA_DIR` overrides the folder; `--source FILE` converts a copy you
+already have). Choosing it in the GUI's MAC box offers the same download.
 
 ### 4.2 Line data
 

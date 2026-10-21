@@ -34,6 +34,7 @@ from ..analysis import masking as MSK
 from ..batch import run_batch, summarise
 from ..io.gpda_write import from_session as write_dam_from_session
 from ..io.gpyield_write import from_session as write_yield_from_session
+from ..io import sabbatucci
 from ..io.live import LiveLMF, refresh_session
 from ..physics import artefacts, lineid
 from ..session import FitOptions, Session
@@ -606,6 +607,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cmb_mac = QtWidgets.QComboBox()
         self.cmb_mac.addItems(['mixed', 'ffast', 'henke1993', 'xcom',
                                'sabbatuccisalvat2016'])
+        self._mac_prev = self.cmb_mac.currentText()
+        self.cmb_mac.currentTextChanged.connect(self.on_mac_changed)
         self.cmb_lines = QtWidgets.QComboBox()
         self.cmb_lines.addItems(['xray_lines_rebuilt.txt', 'xray_lines.txt'])
         self.cmb_lines.currentTextChanged.connect(self.on_lines_file)
@@ -989,7 +992,9 @@ class MainWindow(QtWidgets.QMainWindow):
             o.e_high = float(self.ed_ehi.text())
         except ValueError:
             pass
-        o.mac = self.cmb_mac.currentText()
+        # the accepted dataset: while a fetch runs the box shows one that
+        # is not installed yet
+        o.mac = self._mac_prev
         if (o.e_low, o.e_high) != getattr(self, '_range_shown', None):
             self.rebuild_element_lists()
         o.use_escape_step = self.chk_escape.isChecked()
@@ -1178,6 +1183,64 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_lines_file(self, name):
         self.session.set_lines_file(name)
         self.mark_changed()
+
+    @user_action
+    def on_mac_changed(self, name):
+        """Choosing a MAC table that is not installed (Sabbatucci: EGSnrc
+        data, AGPL-3.0, so not shipped) offers to fetch it. The download runs
+        as a job with the box locked; declining, a failure, or the job being
+        dropped before it ran puts the box back on the previous dataset. A
+        download that has started cannot be cancelled."""
+        db = self.session.db
+        if db.mac_installed(name):
+            self._mac_prev = name
+            return
+        ask = QtWidgets.QMessageBox.question(
+            self, 'Download the Sabbatucci-Salvat table?',
+            'scrappyFIT does not ship this table. It is converted from '
+            "EGSnrc's HEN_HOUSE/data/photo_shellwise.data (National Research "
+            'Council of Canada), which is distributed under the GNU '
+            'AGPL-3.0-or-later.' + chr(10) + chr(10)
+            + 'Download it from github.com/nrc-cnrc/EGSnrc and convert it into '
+            + str(sabbatucci.user_data_dir()) + '?',
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        if ask != QtWidgets.QMessageBox.Yes:
+            self._revert_mac('%s not installed and the download was declined'
+                             % name)
+            return
+        log_event('mac fetch request', dataset=name)
+
+        def work(ctx):
+            # no stop check: a preview submitted meanwhile sets the running
+            # job's stop flag, and that must not cancel a download
+            ctx.progress('downloading photo_shellwise.data from EGSnrc')
+            return sabbatucci.fetch()
+
+        def done(path):
+            self.cmb_mac.setEnabled(True)
+            self._mac_prev = name
+            self.say('Installed %s (EGSnrc data, AGPL-3.0-or-later).' % path)
+
+        def failed(tb):
+            self._revert_mac('the Sabbatucci download failed: %s'
+                             % tb.strip().splitlines()[-1])
+            self.log.appendPlainText(tb)
+
+        def cancelled():
+            self._revert_mac('the Sabbatucci download did not run '
+                             '(cancelled or superseded by another job)')
+
+        self.cmb_mac.setEnabled(False)
+        if not self.jobs.submit(Job('fetch', work, on_done=done,
+                                    on_fail=failed, on_cancel=cancelled)):
+            self._revert_mac('the Sabbatucci download could not start')
+
+    def _revert_mac(self, why):
+        self.cmb_mac.setEnabled(True)
+        self.cmb_mac.blockSignals(True)
+        self.cmb_mac.setCurrentText(self._mac_prev)
+        self.cmb_mac.blockSignals(False)
+        self.say('MAC dataset left at %s: %s.' % (self._mac_prev, why))
 
     @user_action
     def on_preview_toggled(self, on):

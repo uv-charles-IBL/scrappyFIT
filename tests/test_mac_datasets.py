@@ -4,6 +4,15 @@ import pytest
 
 from scrappyfit.physics.gpdb import Database
 
+SABBATUCCI_NAMES = ('sabbatuccisalvat2016', 'sabbatuccisalvat', 'sabbatucci',
+                    'salvat')
+
+
+def _need_sabbatucci(db):
+    if not db.mac_installed('sabbatucci'):
+        pytest.skip('Sabbatucci-Salvat table not installed: run '
+                    '`python -m scrappyfit.io.sabbatucci`')
+
 
 @pytest.fixture(scope='module')
 def db():
@@ -13,25 +22,32 @@ def db():
 def test_every_advertised_dataset_actually_works(db):
     """mac_datasets() is what the GUI offers. Every name in it must return a
     number for a mid-range case, or the dropdown lies."""
+    have = db.mac_installed('sabbatucci')
     for name in db.mac_datasets():
+        if name in SABBATUCCI_NAMES and not have:
+            continue
         v = db.mu(26, 6.404, name)          # Fe Ka, comfortably in range
         assert v is not None, '%s returned None for Fe Ka' % name
         assert 10.0 < v < 500.0, '%s gave mu=%.4g for Fe Ka' % (name, v)
+    if not have:
+        pytest.skip('the other datasets pass; Sabbatucci-Salvat table not '
+                    'installed: run `python -m scrappyfit.io.sabbatucci`')
 
 
 def test_sabbatucci_aliases_all_resolve(db):
     """The file is MAC_SabbatucciSalvat2016.txt and nobody types that. Every
     alias must reach the same table - a bare KeyError used to look like a
     missing data file rather than a misspelt name."""
-    ref = db.mu(14, 6.404, 'sabbatuccisalvat2016')
-    for alias in ('sabbatucci', 'sabbatuccisalvat', 'salvat'):
-        assert db.mu(14, 6.404, alias) == pytest.approx(ref)
     for alias in ('henke', 'henke1993'):
         assert db.mu(14, 6.404, alias) == pytest.approx(
             db.mu(14, 6.404, 'henke1993'))
     for alias in ('ffast', 'chantler'):
         assert db.mu(14, 6.404, alias) == pytest.approx(
             db.mu(14, 6.404, 'ffast'))
+    _need_sabbatucci(db)
+    ref = db.mu(14, 6.404, 'sabbatuccisalvat2016')
+    for alias in ('sabbatucci', 'sabbatuccisalvat', 'salvat'):
+        assert db.mu(14, 6.404, alias) == pytest.approx(ref)
 
 
 def test_unknown_dataset_names_the_valid_ones(db):
@@ -44,8 +60,10 @@ def test_datasets_actually_differ(db):
     """If two datasets returned identical numbers, one is not being loaded."""
     h = db.mu(26, 6.404, 'henke1993')
     f = db.mu(26, 6.404, 'ffast')
-    s = db.mu(26, 6.404, 'sabbatucci')
     x = db.mu(26, 6.404, 'xcom')
+    assert len({round(v, 3) for v in (h, f, x)}) == 3
+    _need_sabbatucci(db)
+    s = db.mu(26, 6.404, 'sabbatucci')
     assert len({round(v, 3) for v in (h, f, s, x)}) == 4
 
 
