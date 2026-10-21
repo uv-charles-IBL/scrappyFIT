@@ -82,3 +82,57 @@ def test_predict_si_unchanged_and_other_crystals_have_no_escapes():
 
     cd, _, _ = artefacts.predict(db, y, cal, els, areas=areas, crystal_Z=48)
     assert cd == []
+
+
+@pytest.mark.xfail(strict=True, reason='BUGS.md: Si escape markers use 1.7397 keV, the fit 1.740')
+def test_si_escape_markers_use_the_fit_escape_energy():
+    """artefacts SI_KA/SI_K_EDGE must equal EscapeModel's e_alpha/k_edge (db Si Ka_, edge)."""
+    from scrappyfit.physics import artefacts
+    from scrappyfit.physics.escape import EscapeModel
+    db = Session().db
+    em = EscapeModel(db, 14, 5000.0)
+    e_alpha, k_edge = artefacts.crystal_escape(db, 14)
+    assert e_alpha == pytest.approx(em.e_alpha, abs=1e-9)
+    assert k_edge == pytest.approx(em.k_edge, abs=1e-9)
+    assert k_edge == pytest.approx(db.edge[(14, 'K')], abs=1e-9)
+
+    y = np.full(4096, 10.0)
+    cal = (0.0016984, -0.37225)
+    areas = {'Ca': 1e5, 'Ti': 2e5, 'Si': 1e6}
+    els = [(14, 1), (20, 1), (22, 1)]
+    esc, _, _ = artefacts.predict(db, y, cal, els, areas=areas, crystal_Z=14)
+    by = {a.parents[0]: a for a in esc}
+    assert {'Ca', 'Ti'} <= set(by)
+    for name, Z in (('Ca', 20), ('Ti', 22)):
+        assert by[name].energy == pytest.approx(
+            db.line_energy(Z, 1) - em.e_alpha, abs=1e-9)
+
+
+@pytest.mark.xfail(strict=True, reason='BUGS.md: No Ge K-beta escape markers')
+def test_ge_crystal_gets_kbeta_escape_markers():
+    """predict() on Ge must also mark the K-beta escape (E - Ge Kb1) for parents above the edge."""
+    from scrappyfit.physics import artefacts
+    from scrappyfit.physics.escape import EscapeModel
+    db = Session().db
+    frac = EscapeModel(db, 32, 5000.0).fraction
+    y = np.full(4096, 10.0)
+    cal = (0.007, 0.0)
+    areas = {'Zr': 1e6, 'Mo': 1e6}
+    els = [(40, 1), (42, 1)]
+
+    esc, _, _ = artefacts.predict(
+        db, y, cal, els, e_low=0.2, e_high=25.0, areas=areas,
+        escape_fraction=frac, crystal_Z=32)
+
+    ge_ka = db.lineE[32]['Ka1']
+    ge_kb = db.lineE[32]['Kb1']
+    for name, Z in (('Zr', 40), ('Mo', 42)):
+        E = db.line_energy(Z, 1)
+        mine = [a for a in esc if a.parents == (name,)]
+        beta = [a for a in mine if abs(a.energy - (E - ge_kb)) < 1e-6]
+        alpha = [a for a in mine if abs(a.energy - (E - ge_ka)) < 1e-6]
+        assert len(alpha) == 1
+        assert len(beta) == 1, f'no Kb escape marker for {name}'
+        b = beta[0]
+        assert b.kind == 'escape' and name in b.label
+        assert b.intensity < alpha[0].intensity
