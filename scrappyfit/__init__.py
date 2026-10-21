@@ -35,5 +35,5 @@ the original:
 
 # the single version: pyproject.toml reads it. Between tags it is the next
 # release with .dev0; set it to X.Y.Z in the commit that is tagged vX.Y.Z.
-__version__ = '0.25.0'
+__version__ = '0.26.0.dev0'
 __all__ = ['io', 'physics', 'fitting', 'analysis']
