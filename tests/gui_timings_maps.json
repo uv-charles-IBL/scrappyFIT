@@ -1,0 +1,25 @@
+{
+ "_about": "J6 step times (ms), two runs on Charles's Windows 11 desktop, 2026-10-20, branch fix/maps-view, recorded with SCRAPPYFIT_TIMINGS_OUT; tests/gui_budgets.json J6 budgets = 1.5 x the slower run.",
+ "run1": {
+  "J6.fit_field": 5106.3,
+  "J6.grow": 600.3,
+  "J6.mask": 649.5,
+  "J6.open": 301.1,
+  "J6.refit_region": 2107.5,
+  "J6.reset": 99.8,
+  "J6.show_map": 102.9,
+  "J6.show_map_again": 109.0,
+  "J6.shrink": 612.5
+ },
+ "run2": {
+  "J6.fit_field": 4981.9,
+  "J6.grow": 595.6,
+  "J6.mask": 642.5,
+  "J6.open": 294.5,
+  "J6.refit_region": 2102.8,
+  "J6.reset": 97.4,
+  "J6.show_map": 103.0,
+  "J6.show_map_again": 109.8,
+  "J6.shrink": 615.4
+ }
+}

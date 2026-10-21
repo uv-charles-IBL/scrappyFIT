@@ -1,0 +1,930 @@
+"""
+PIXE spectrum fitting.
+
+Structure follows GeoPIXE's pixe_fit.pro: the element amplitudes enter the
+model linearly, everything else (calibration, width, tail) does not. So the
+fit alternates
+
+    linear step     solve for element areas by weighted least squares
+    non-linear step adjust cal / width / tail to reduce chi-squared
+
+which is the standard treatment and is what makes trace elements tractable:
+the weak components are solved exactly at every step rather than being pushed
+around by a general optimiser.
+
+Weights follow Awaya (1978) as GeoPIXE does - the variance is taken from the
+FITTED model, not the observed counts. Using observed counts biases weak peaks
+low, because a downward Poisson fluctuation gets a larger weight. That bias is
+precisely where trace element analysis lives, so it matters here more than
+anywhere else.
+
+    C.G. Ryan et al. (1990), Nucl. Instr. Meth. B49, 271.
+    P.R. Bevington (1969), Data Reduction and Error Analysis.
+"""
+
+import numpy as np
+
+import copy as _copy
+
+from .peakshape import (P_FANO, P_NOISE, P_PILEUP, ShapePars,  # noqa: F401
+                        erfc_saturated, line_profile)
+
+
+class FitCancelled(Exception):
+    """Raised inside a fit when its should_stop callback says to stop."""
+
+
+class Component:
+    """One fitted component - normally one element/shell.
+
+    Escape lines are held in the SAME component as their parent, scaled by the
+    escape fraction. They are not separate free parameters: tying them means
+    they constrain the parent area rather than adding a degree of freedom.
+    """
+
+    def __init__(self, name, lines, tail_amp_fn=None, tail_len_fn=None,
+                 beta_tail=1.0, escape=None, tilt_deg=0.0):
+        self.name = name
+        self.lines = list(lines)          # [(E_keV, relative_intensity), ...]
+        if escape is not None:
+            self.lines += escape.escape_lines(self.lines, tilt_deg=tilt_deg)
+        self.tail_amp_fn = tail_amp_fn
+        self.tail_len_fn = tail_len_fn
+        self.beta_tail = beta_tail
+        # an EmpiricalResponse (fitting.hypermet) replaces GeoPIXE's Gaussian +
+        # exponential tail when set; None keeps line.pro's shape
+        self.response = None
+
+    def profile(self, pars, n_channels, do_tail=True):
+        f = np.zeros(n_channels)
+        if self.response is not None:
+            from .hypermet import line_profile as _hyp
+            for E, beta in self.lines:
+                f += _hyp(E, beta, pars, n_channels, self.response)
+            return f
+        for E, beta in self.lines:
+            ta = self.tail_amp_fn(E) if self.tail_amp_fn else 0.0
+            tl = self.tail_len_fn(E) if self.tail_len_fn else 0.0
+            f += line_profile(E, beta, pars, n_channels, tail_amp=ta,
+                              tail_len=tl, beta_tail=self.beta_tail,
+                              do_tail=do_tail)
+        return f
+
+
+def pileup_component(components, pars, n_channels, areas=None, ratio=1.0):
+    """Sum-peak pile-up: the self-convolution of the modelled spectrum.
+
+    Two photons arriving within the shaping time are recorded as one event at
+    the sum of their energies. The resulting spectrum is the autocorrelation of
+    the true one, scaled by a rate-dependent constant. GeoPIXE carries that
+    constant as parameter index 4 and fits it.
+
+    Computed from the CURRENT model rather than from the data, so it does not
+    import the data's noise into the model, and so it responds to the fit.
+    """
+    m = np.zeros(n_channels)
+    for i, c in enumerate(components):
+        w = 1.0 if areas is None else max(areas[i], 0.0)
+        if w > 0:
+            m += w * c.profile(pars, n_channels)
+    if m.sum() <= 0:
+        return m
+    full = np.convolve(m, m)[:n_channels]
+    return ratio * full / max(m.sum(), 1.0)
+
+
+def expected_pileup_fraction(total_counts, live_seconds,
+                             shaping_time_us=1.0):
+    """rate x tau: the chance a second photon arrives inside the shaping
+    time. First order, good to a factor of a few - ample to reject a fit that
+    is out by three orders of magnitude. None when the live time is unknown,
+    so the caller decides rather than being handed a guess."""
+    if not (total_counts and live_seconds and live_seconds > 0):
+        return None
+    return (float(total_counts) / float(live_seconds)) *         float(shaping_time_us) * 1e-6
+
+
+#: How strongly a subshell prior pulls, as the fraction of the group's own
+#: counts it is worth. 0.05 means the prior is as persuasive as 5% of the
+#: gold that was measured: decisive on a weak spectrum, irrelevant on a
+#: strong one. Keyed by group name, None for the default.
+PRIOR_STRENGTH = {None: 0.05}
+
+
+class BackgroundComponent:
+    """The continuum, with an amplitude the fit is allowed to choose.
+
+    pixe.pro forms its model as
+
+        result = signal + a[7]*background1 + a[10]*background2 + a[4]*pileup
+
+    so the background enters with a FREE amplitude, exactly like an element.
+    This package instead SUBTRACTED a fixed SNIP estimate, which is a
+    different thing and a worse one.
+
+    SNIP strips peaks down to the continuum, and next to a very large peak it
+    strips a little too deep - the peak's own wings look like peak to it. The
+    result is a background that is too low in a band a few hundred eV wide
+    around every strong line. Subtract that and the model is short there, and
+    the only way the fit can make up the difference is to inflate the element
+    that owns the peak. On donut2x the iron area came out 1.34x too large for
+    exactly this reason, with 47% of the total chi2 sitting 0.4-1.0 keV out
+    from the strong peaks where the model ran +20 sigma short.
+
+    Letting the amplitude float does not let the background eat real peaks:
+    its shape is fixed, and a smooth curve cannot take on a peak's shape. It
+    only lets the fit say the continuum is 1.1x what SNIP guessed, which is
+    the honest degree of freedom that was missing.
+    """
+
+    name = 'background'
+
+    def __init__(self, shape):
+        self._shape = np.asarray(shape, float)
+        self.tail_amp_fn = lambda E: 0.0
+        self.tail_len_fn = lambda E: 0.0
+
+    def profile(self, pars, n_channels):
+        b = self._shape
+        if len(b) < n_channels:
+            b = np.pad(b, (0, n_channels - len(b)))
+        return b[:n_channels]
+
+
+class SumPeakComponent:
+    """Pile-up as GeoPIXE models it: discrete sum LINES, not a convolution.
+
+    This replaces an earlier version that used the self-convolution of the
+    whole model. That was the wrong shape and it mattered enormously. A
+    self-convolution of a spectrum-plus-continuum is smooth, positive and
+    non-zero everywhere, so the fitter could use it to absorb any modelling
+    error anywhere. On run 287424 it took 22% of the spectrum, against a
+    physical expectation of 0.017% at 168 counts/s - out by a factor of 1300
+    - and it disguised the problem, because switching it off sent chi2 from
+    91 to 161 as though pile-up had been doing real work.
+
+    sum_peaks.pro builds something quite different: ONE pseudo-element whose
+    lines sit at every pairwise sum E_i + E_j of the strongest real lines,
+    with intensity proportional to the product of the parent AREAS. Those are
+    sharp features at specific energies. They can fit a sum peak and they
+    cannot fit a broad continuum error, which is exactly the property that
+    keeps the fit honest.
+
+    Following sum_peaks.pro:
+      check_double = 30   strongest lines combined pairwise
+      check_triple = 6    strongest also combined in threes
+      lines under 100 counts are ignored
+      sum_deficit         fraction lost to finite time resolution, 0.1
+
+    The intensities depend on the fitted areas, so the shape has to be
+    rebuilt as the fit converges - update() does that, and fit_spectrum
+    calls it between passes. The amplitude itself stays a single free
+    parameter, as a[4] is in pixe.pro.
+    """
+
+    name = 'pileup'
+    CHECK_DOUBLE = 30
+    CHECK_TRIPLE = 6
+    MIN_REL = 0.0003        # sum_peaks.pro: ar > 0.0003 * ar[0]
+
+    def __init__(self, components, sum_deficit=0.1, e_high=None,
+                 max_area=None, e_min=None):
+        """e_min: the fast threshold, keV. Pairs whose smaller line is below it
+        are pile-up with a pulse the rejector cannot see - the sub-threshold
+        component's job - and are left out here so they are not counted twice."""
+        self.e_min = e_min
+        self._src = list(components)
+        self.sum_deficit = float(sum_deficit)
+        self.e_high = e_high
+        self.max_area = max_area
+        self._lines = []                 # [(energy, weight)]
+        self._pairs = []                 # [(e_i, e_j, weight)] for the plateau
+        self.width_factor = 1.0          # 1: sum peak has a line's width at its energy
+        self.tail_amp_fn = lambda E: 0.0
+        self.tail_len_fn = lambda E: 0.0
+
+    def update(self, areas, amplitude=None):
+        """Rebuild the sum-line list from the current element areas.
+
+        Follows sum_peaks.pro closely, including three things this got wrong
+        the first time:
+
+        1. TRIPLES ARE SCALED BY p_factor. GeoPIXE forms the double products
+           normalised to the strongest, r2 = d2/d2[0], and the triples as
+           r4 = p_factor * d4/d4[0], where p_factor = asum/ar[0] is the
+           pile-up probability. Without that factor the triple products - a
+           product of THREE areas rather than two - are larger than the
+           doubles by roughly the size of an area, about a million. The
+           component then peaks at three times the strongest line instead of
+           twice: on run 287427 it sat at 5.22 keV, which is 3 x Si Ka, when
+           the real sum peak is Si+O at 2.27 keV.
+
+        2. sum_deficit shifts the ENERGY, not the amplitude. sum_peaks.pro
+           forms e = (1 - sum_deficit/100) * (e_i + e_j): two pulses that
+           merge are slightly clipped, so the sum lands a little BELOW the
+           arithmetic sum. It is also a percentage, so 0.1 means 0.1%, not
+           10%.
+
+        3. Lines are selected relative to the strongest, ar > 0.0003*ar[0],
+           not against an absolute count.
+
+        amplitude: the sum component's own fitted area, for p_factor. On the
+        first pass it is unknown and only doubles are built, which is also
+        what sum_peaks.pro does - it requires asum > 1000 before it will
+        consider triples at all.
+        """
+        strong = []
+        for c in self._src:
+            area = areas.get(getattr(c, 'name', None), 0.0)
+            if area <= 0.1:
+                continue
+            for e, inten in getattr(c, 'lines', ()) or ():
+                strong.append((area * inten, float(e)))
+        if not strong:
+            self._lines = []
+            return 0
+        strong.sort(reverse=True)
+        top = strong[0][0]
+        strong = [t for t in strong if t[0] > self.MIN_REL * top]
+
+        # energies are stored as raw sums; the deficit is applied in profile()
+        # so that it can be refined (pars.a[4]) without rebuilding the list
+        shift = 1.0
+        out = []
+
+        dbl = strong[:self.CHECK_DOUBLE]
+        d0 = dbl[0][0] * dbl[0][0]
+        pairs = []
+        for i, (wi, ei) in enumerate(dbl):
+            for j, (wj, ej) in enumerate(dbl):
+                es = shift * (ei + ej)
+                if self.e_high and es > self.e_high:
+                    continue
+                if self.e_min and min(ei, ej) < self.e_min:
+                    continue
+                out.append((es, wi * wj / d0))
+                if j >= i:
+                    pairs.append((ei, ej, (1.0 if i == j else 2.0) * wi * wj / d0))
+        self._pairs = pairs
+
+        # Triples, only once the amplitude is known and large enough to
+        # matter - the same gate sum_peaks.pro applies.
+        p_factor = (float(amplitude) / top) if (amplitude and top > 0) else 0.0
+        if amplitude and amplitude > 1000.0 and p_factor > 3.0e-4:
+            tri = strong[:self.CHECK_TRIPLE]
+            t0 = 3.0 * tri[0][0] ** 3
+            for wi, ei in tri:
+                for wj, ej in tri:
+                    for wk, ek in tri:
+                        es = shift * (ei + ej + ek)
+                        if self.e_high and es > self.e_high:
+                            continue
+                        out.append((es, p_factor * 3.0 * wi * wj * wk / t0))
+
+        tot = sum(w for _, w in out)
+        if tot > 0:
+            out = [(e, w / tot) for e, w in out]
+        self._lines = out
+        return len(out)
+
+    def profile(self, pars, n_channels):
+        """Unit-area sum of the sum-peak lines.
+
+        Uses the same line_profile as every other component, so the sum peaks
+        get the detector's real width and tail rather than a bare Gaussian.
+        The width is then widened by sqrt(2): two independent events add
+        their variances, which is also the practical tell that a feature is a
+        sum peak rather than a line.
+        """
+        f = np.zeros(n_channels)
+        if not self._lines:
+            return f
+        # Width: the width of an ordinary line AT THE SUM ENERGY, not sqrt(2)
+        # wider. Two photons summed inside one shaping interval are ONE
+        # measurement: the electronic noise enters once and only the Fano
+        # (statistical) term adds, and FWHM^2 = noise^2 + fano^2 (E - e0) is
+        # already additive in E. Measured on 2026-09-23: Si+Si sum FWHM 132 eV
+        # against 130 eV for a line at 3.48 keV, and 155 eV for sqrt(2) x Si Ka.
+        # Deficit: pars.a[4] in percent when refined, else sum_deficit.
+        d = float(pars.a[P_PILEUP]) if pars.a[P_PILEUP] != 0.0 else self.sum_deficit
+        shift = 1.0 - d / 100.0
+        wide = pars
+        if self.width_factor != 1.0:
+            wide = _copy.copy(pars)
+            wide.a = np.array(pars.a, dtype=float)
+            wide.a[P_NOISE] *= self.width_factor
+            wide.a[P_FANO] *= self.width_factor
+        # Optional spread of deficits: pulses summed at different times inside the
+        # shaping interval lose different fractions, so the sum peak can be a
+        # flat-topped band from (1 - d) down to (1 - d - spread) of the sum.
+        # Seen on the 2026-09 runs as a Si+Si hump 3.25-3.55 keV, not a line.
+        spread = float(getattr(self, 'deficit_spread', 0.0))
+        shifts = ([shift] if spread <= 0 else
+                  list(1.0 - (d + np.linspace(0.0, spread, 9)) / 100.0))
+        # (i, j) and (j, i) are the same sum line - equal energy and weight to
+        # the bit - so each distinct line is profiled once and its array added
+        # again where the duplicate falls: the same additions in the same
+        # order, at about half the cost.
+        seen = {}
+        for e, w in self._lines:
+            for sh in shifts:
+                key = (sh * e, w / len(shifts))
+                p = seen.get(key)
+                if p is None:
+                    p = seen[key] = line_profile(key[0], key[1], wide,
+                                                 n_channels, do_tail=False)
+                f += p
+        t = f.sum()
+        return f / t if t > 0 else f
+
+
+class PileupPlateauComponent:
+    """Partial pile-up: two pulses arriving offset in time within the shaping
+    interval are recorded somewhere BETWEEN the larger of the two energies and
+    their sum, not at the sum. Each line pair therefore contributes a flat box
+    from max(E_i, E_j) to E_i + E_j under its sum peak, weighted like the sum
+    peak (product of the parent areas). One free linear amplitude.
+
+    GeoPIXE models the sum peaks only. Without this term the sum-peak energy
+    deficit, when refined, is dragged to 0.5-1.8 % to cover the plateau on the
+    low side of Si+Si, against 0.06-0.4 % measured from the centroid alone
+    (runs 403001-403006).
+    """
+
+    name = 'pileup plateau'
+
+    def __init__(self, sum_component, kind='flat'):
+        """kind 'flat': uniform from max(E_i, E_j) to the sum. 'ramp': rising
+        linearly toward the sum - pulses offset by only a little in time are
+        the likeliest to be caught, so the partial sums crowd toward the full
+        sum. Both are offered as separate linear components; the fit sets the
+        mix (403001 and 403006 need mostly ramp, 403004 mostly flat)."""
+        self._sum = sum_component
+        self.kind = kind
+        if kind != 'flat':
+            self.name = 'pileup ' + kind
+        self.lines = ()
+        self.tail_amp_fn = lambda E: 0.0
+        self.tail_len_fn = lambda E: 0.0
+
+    def profile(self, pars, n_channels):
+        f = np.zeros(n_channels)
+        pr = getattr(self._sum, '_pairs', None) or []
+        if not pr:
+            return f
+        wmax = max(w for _, _, w in pr)
+        x = np.arange(n_channels, dtype=float)
+        for ei, ej, w in pr:
+            if w < 1e-4 * wmax:
+                continue
+            lo = float(pars.centroid(max(ei, ej)))
+            hi = float(pars.centroid(ei + ej))
+            if hi - lo < 1.0 or hi < 0 or lo > n_channels:
+                continue
+            sg = float(pars.fwhm_channels(ei + ej)) / np.sqrt(8.0 * np.log(2.0))
+            # Only channels where the box can be non-zero. Below lo the erfc
+            # arguments exceed 26.6, where erfc is exactly 0.0; above hi both
+            # are under -5.86, where it is exactly 2.0 and the difference
+            # exactly 0.0. The window keeps a margin past both (30 and -8), so
+            # the profile is bit-identical to evaluating every channel, at a
+            # fraction of the cost (this was 11 of 52 s profiling run 287424).
+            s2 = np.sqrt(2.0) * sg
+            i0, i1 = lo - 30.0 * s2, hi + 8.0 * s2
+            if np.isfinite(i0) and np.isfinite(i1):
+                i0 = min(max(int(np.floor(i0)), 0), n_channels)
+                i1 = min(max(int(np.ceil(i1)) + 1, 0), n_channels)
+            else:
+                i0, i1 = 0, n_channels
+            xs = x[i0:i1]
+            box = (erfc_saturated((lo - xs) / (np.sqrt(2.0) * sg))
+                   - erfc_saturated((hi - xs) / (np.sqrt(2.0) * sg))) / (2.0 * (hi - lo))
+            if self.kind == 'ramp':
+                box = box * np.clip((xs - lo) / (hi - lo), 0.0, 1.0) * 2.0
+            f[i0:i1] += w * box
+        t = f.sum()
+        return f / t if t > 0 else f
+
+
+class SubThresholdPileupComponent:
+    """Pile-up of every line with a pulse too small to be seen.
+
+    When the DPP's fast channel is not triggering (a fast threshold set far
+    too high, as on the 12 Sep 2026 MnOx run where it counted 2,573 events
+    against 1.66 M), nothing is rejected and every X-ray that lands within
+    the slow shaping time of a small pulse - electronic noise, the
+    sub-threshold tail of the low energy continuum - is recorded at its own
+    energy plus that of the partner. The result is a shoulder on the high
+    side of every strong line, 0 to a few hundred eV wide, which no sum-peak
+    list can make because the partners are below the MCA threshold.
+
+    The partner distribution is taken flat from 0 to `width_kev`; the shape
+    of the component is the line model convolved with that box, and its
+    amplitude is fitted. It is one number, and it exists to keep the fit from
+    pushing that shoulder into iron or the Mn Kbeta tail. Rebuilt from the
+    current areas between passes, like SumPeakComponent.
+    """
+    name = 'subthreshold pileup'
+
+    def __init__(self, components, width_kev=0.35, spectrum=None, cal=None):
+        """spectrum, cal: when given, the partner distribution is the MEASURED
+        spectrum below width_kev (the fast threshold) instead of a flat box -
+        a line piles up with the C, N, O and threshold-noise pulses the fast
+        channel cannot see, so Mn Ka + C/N/O lands at 6.18-6.42 keV, in the
+        Ka-Kb valley. The invisible part below the ADC threshold is extended
+        flat at the level of the first visible channels."""
+        self._src = list(components)
+        self.width_kev = float(width_kev)
+        self._spec = None if spectrum is None else np.asarray(spectrum, float)
+        self._cal = cal
+        self._shape = None
+        self.tail_amp_fn = lambda E: 0.0
+        self.tail_len_fn = lambda E: 0.0
+
+    def update(self, areas, pars, n_channels, cal_a):
+        m = np.zeros(n_channels)
+        for c in self._src:
+            a = areas.get(getattr(c, 'name', None), 0.0)
+            if a > 0:
+                m += a * c.profile(pars, n_channels)
+        if m.sum() <= 0:
+            self._shape = None
+            return 0
+        k = max(int(round(self.width_kev / cal_a)), 1)
+        if self._spec is not None and self._cal is not None:
+            a0, b0 = self._cal
+            e = a0 * np.arange(len(self._spec)) + b0
+            vis = np.nonzero((self._spec > 0) & (e > 0))[0]
+            box = np.zeros(k)
+            if len(vis):
+                i0 = vis[0] + 3                              # skip the discriminator edge
+                ch0 = int(round((e[i0]) / cal_a))            # its offset in channels from 0 keV
+                lvl = float(np.mean(self._spec[i0:i0 + 20]))
+                for j in range(k):
+                    ej = j * cal_a
+                    if ej < e[i0]:
+                        box[j] = lvl                           # below the ADC threshold: flat
+                    else:
+                        idx = int(round((ej - b0) / a0))
+                        box[j] = self._spec[idx] if 0 <= idx < len(self._spec) else 0.0
+            if box.sum() <= 0:
+                box = np.ones(k)
+            # Partial sums: the partner arrives at a random time within the
+            # shaping interval, so a pulse of energy e adds anywhere from 0 to
+            # e. Kernel K(d) = sum over e >= d of S(e)/e. A flat box is this
+            # kernel for a single partner energy.
+            ee = np.maximum(np.arange(k) * cal_a, cal_a)
+            box = np.cumsum((box / ee)[::-1])[::-1]
+            box = box / box.sum()
+        else:
+            box = np.ones(k) / k
+        conv = np.convolve(m, box)[:n_channels]
+        t = conv.sum()
+        self._shape = conv / t if t > 0 else None
+        return 1
+
+    def profile(self, pars, n_channels):
+        if self._shape is None or len(self._shape) != n_channels:
+            return np.zeros(n_channels)
+        return self._shape
+
+
+class FitResult:
+    def __init__(self, areas, errors, names, chi2, ndf, model, background,
+                 pars, profiles):
+        self.areas = areas
+        self.errors = errors
+        self.names = names
+        self.chi2 = chi2
+        self.ndf = ndf
+        self.model = model
+        self.background = background
+        self.pars = pars
+        self.profiles = profiles
+
+    @property
+    def reduced_chi2(self):
+        return self.chi2 / self.ndf if self.ndf > 0 else float('nan')
+
+    def residual_peaks(self, counts, cal_a, cal_b, e_low, e_high,
+                       fwhm_ev=160.0, min_sigma=4.0, top=5):
+        """Peaks the model does not explain, largest first.
+
+        Each is (energy_keV, excess_counts, significance). The residual
+        (data - model) is smoothed over one FWHM, so a single noisy channel
+        does not register but a real line does; a peak is reported when its
+        summed excess exceeds min_sigma standard deviations of the model
+        counts under it. On run 380006 this reports 2700 counts at 10.54
+        keV at 34 sigma - arsenic, which was not in the element list.
+        """
+        n = len(counts)
+        E = cal_a * np.arange(n) + cal_b
+        r = counts.astype(float) - self.model
+        w = max(int(round(fwhm_ev / 1000.0 / cal_a)), 1)
+        k = np.ones(w)
+        excess = np.convolve(r, k, mode='same')
+        var = np.convolve(np.maximum(self.model, 1.0), k, mode='same')
+        sig = excess / np.sqrt(var)
+        inside = (E >= e_low) & (E <= e_high)
+        found = []
+        taken = np.zeros(n, dtype=bool)
+        for i in np.argsort(-sig):
+            if not inside[i] or taken[i] or sig[i] < min_sigma:
+                if sig[i] < min_sigma:
+                    break
+                continue
+            found.append((float(E[i]), float(excess[i]), float(sig[i])))
+            taken[max(i - 2 * w, 0):i + 2 * w + 1] = True
+            if len(found) >= top:
+                break
+        return found
+
+    def table(self):
+        out = ['  component      area        error      rel.err',
+               '  ' + '-' * 46]
+        for n, a, e in zip(self.names, self.areas, self.errors):
+            rel = 100.0 * e / a if a > 0 else float('nan')
+            out.append('  %-10s %11.1f %11.1f %9.2f%%' % (n, a, e, rel))
+        out.append('  reduced chi2 = %.3f  (%d dof)' % (self.reduced_chi2, self.ndf))
+        return '\n'.join(out)
+
+
+def _weights(model, floor=1.0):
+    """Awaya weights: variance from the model, floored so empty channels
+    cannot dominate."""
+    return 1.0 / np.maximum(model, floor)
+
+
+def linear_step(counts, background, components, pars, channels,
+                n_iter=3, nonneg=True):
+    """Solve for areas, honouring any component that declares a max_area.
+
+    A capped component is solved unbounded first. If it comes back over its
+    cap it is PINNED at the cap - not dropped, because those counts are real
+    and still have to be accounted for - moved into the background, and the
+    remaining components re-solved against what is left. The degrees of
+    freedom drop accordingly, since a pinned component is no longer fitted.
+    """
+    caps = {i: c.max_area for i, c in enumerate(components)
+            if getattr(c, 'max_area', None) is not None}
+    areas, errors, chi2, ndf, A = _linear_step_free(
+        counts, background, components, pars, channels, n_iter, nonneg)
+    over = {i: lim for i, lim in caps.items() if areas[i] > lim}
+    if not over:
+        return areas, errors, chi2, ndf, A
+
+    pinned = np.zeros(len(counts))
+    for i, lim in over.items():
+        pinned += A[:, i] * lim
+    keep = [i for i in range(len(components)) if i not in over]
+    sub_a, sub_e, chi2, _, _ = _linear_step_free(
+        counts, background + pinned, [components[i] for i in keep],
+        pars, channels, n_iter, nonneg)
+
+    areas = np.zeros(len(components))
+    errors = np.zeros(len(components))
+    for j, i in enumerate(keep):
+        areas[i] = sub_a[j]
+        errors[i] = sub_e[j]
+    for i, lim in over.items():
+        areas[i] = lim
+        errors[i] = 0.0            # pinned, not measured
+    return areas, errors, chi2, len(channels) - len(keep), A
+
+
+def _linear_step_free(counts, background, components, pars, channels,
+                      n_iter=3, nonneg=True):
+    """Solve for component areas at fixed shape parameters.
+
+    Iterated because the weights depend on the model, which depends on the
+    areas. Three passes is what GeoPIXE uses and is enough in practice.
+
+    nonneg
+        True     unconstrained solve; negative areas are reported as-is and
+                 clipped only for the weighting model. A negative area is
+                 informative - it says the component is not present - so this
+                 is the right mode when deciding whether to keep an element.
+        'strict' true non-negative least squares. Use this when COMPARING
+                 models, because an unconstrained chi2 can be lowered by a
+                 physically impossible negative peak, which makes two variants
+                 incomparable.
+    """
+    n = len(counts)
+    A = np.column_stack([c.profile(pars, n) for c in components])
+    Ac = A[channels, :]
+    yc = counts[channels] - background[channels]
+
+    # Soft priors on the ratio of components within a group.
+    #
+    # Components carrying the same .prior_group and a .prior_fraction f_i
+    # are pulled toward a_i = f_i * sum(group). That is a linear condition
+    # on the areas, so it enters the least-squares problem as extra rows:
+    #
+    #     sqrt(lam) * (a_i - f_i * sum_j a_j) = 0
+    #
+    # The weight lam is set from the data so the prior carries the
+    # statistical weight of a chosen fraction of the group's own counts -
+    # a strong-gold spectrum overrides it and a weak one defers to it,
+    # which is the whole point. Without this, two subshells whose main
+    # lines sit 81 eV apart under a 130 eV FWHM are degenerate on a weak
+    # spectrum, and on 380006 the fit put all of M4 into M5.
+    groups = {}
+    for i, c in enumerate(components):
+        g = getattr(c, 'prior_group', None)
+        f = getattr(c, 'prior_fraction', None)
+        if g is not None and f is not None:
+            groups.setdefault(g, []).append((i, float(f)))
+    prior_rows, prior_rhs, prior_w = [], [], []
+    if groups:
+        # a first unconstrained pass sets the scale of each group
+        w0 = _weights(np.maximum(counts[channels], 1.0))
+        try:
+            a0 = np.linalg.lstsq(Ac * np.sqrt(w0)[:, None],
+                                 yc * np.sqrt(w0), rcond=None)[0]
+        except Exception:
+            a0 = np.zeros(A.shape[1])
+        for g, members in groups.items():
+            tot = max(sum(max(a0[i], 0.0) for i, _ in members), 1.0)
+            strength = PRIOR_STRENGTH.get(g, PRIOR_STRENGTH.get(None, 0.05))
+            # The row's residual is (a_i - f_i * total), in counts. Give it
+            # a standard deviation of strength x total, so a departure of
+            # 5% of the group costs one sigma; the weight is the inverse
+            # variance, the same footing as the data rows (1 / counts).
+            # The first version used strength x total as the WEIGHT, which
+            # is ten orders of magnitude too strong - it pinned the strong
+            # runs to the prior exactly and worsened their chi2.
+            lam = 1.0 / (strength * tot) ** 2
+            for i, f in members:
+                row = np.zeros(A.shape[1])
+                row[i] = 1.0
+                for j, _ in members:
+                    row[j] -= f
+                prior_rows.append(row)
+                prior_rhs.append(0.0)
+                prior_w.append(lam)
+    if prior_rows:
+        Ac = np.vstack([Ac, np.array(prior_rows)])
+        yc = np.concatenate([yc, np.array(prior_rhs)])
+        prior_w = np.array(prior_w)
+
+    model = np.maximum(counts[channels], 1.0)
+    areas = None
+    for _ in range(n_iter):
+        w = _weights(model)
+        if prior_rows:
+            w = np.concatenate([w, prior_w])
+        Aw = Ac * w[:, None]
+        M = Ac.T @ Aw
+        v = Aw.T @ yc
+        try:
+            cov = np.linalg.inv(M)
+        except np.linalg.LinAlgError:
+            cov = np.linalg.pinv(M)
+        if nonneg == 'strict':
+            from scipy.optimize import nnls
+            sw = np.sqrt(w)
+            areas, _ = nnls(Ac * sw[:, None], yc * sw)
+        else:
+            areas = cov @ v
+        if nonneg:
+            # one round of clipping: drop negatives and re-solve on the rest.
+            # Negative areas are physically meaningless but ARE informative -
+            # they say the component is not detected - so they are reported
+            # by fit_spectrum and only clipped for the model used in weighting.
+            areas_w = np.maximum(areas, 0.0)
+        else:
+            areas_w = areas
+        model = np.maximum((Ac @ areas_w)[:len(channels)]
+                           + background[channels], 1.0)
+
+    # chi2 over the DATA rows only; the prior rows are a regulariser, not
+    # a measurement, and must not be reported as goodness of fit
+    nd = len(channels)
+    resid = yc[:nd] - Ac[:nd] @ areas
+    w = _weights(model)
+    chi2 = float(np.sum(w * resid ** 2))
+    ndf = len(channels) - len(components)
+    errors = np.sqrt(np.maximum(np.diag(cov), 0.0))
+    return areas, errors, chi2, ndf, A
+
+
+def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
+                 noise, fano, tail_amp=0.0, tail_len=0.0,
+                 background=None, refine=('cal', 'width'), max_iter=12,
+                 verbose=False, nonneg=True, fit_background=True,
+                 start_pars=None, refine_from_start=False, should_stop=None):
+    """Fit a PIXE spectrum.
+
+    counts            spectrum
+    cal_a, cal_b      initial energy calibration, E = cal_a*ch + cal_b
+    components        list of Component
+    e_low, e_high     fit range, keV
+    noise, fano       initial width parameters, in the GeoPIXE parameterisation
+                      (channels; w^2 = noise^2 + fano^2*(E - e_low))
+    background        pre-computed background, or None to SNIP it here
+    fit_background    give the background a free amplitude, as pixe.pro does,
+                      instead of subtracting it. See BackgroundComponent -
+                      subtracting a SNIP estimate near a strong peak leaves
+                      the model short and the fit inflates the element to
+                      compensate.
+    refine            which non-linear groups to vary: 'cal', 'width', 'tail'
+    should_stop       optional callable() -> bool, polled at every residual
+                      evaluation; True raises FitCancelled. It only reads a
+                      flag, so the numbers are the same with or without it.
+    """
+    from .background import snip
+
+    counts = np.asarray(counts, dtype=float)
+    n = len(counts)
+
+    if background is None:
+        background = snip(counts, cal_a, cal_b, e_low, e_high)
+    background = np.asarray(background, float)
+
+    # GeoPIXE fits the background amplitude rather than subtracting a fixed
+    # estimate (pixe.pro: result = signal + a[7]*background1 + ...). Do the
+    # same: the SNIP curve becomes a component with a free amplitude, and
+    # nothing is subtracted from the data.
+    fitted_bg = None
+    if fit_background:
+        fitted_bg = BackgroundComponent(background)
+        components = list(components) + [fitted_bg]
+        background = np.zeros_like(background)
+
+    # GeoPIXE references the centroid to eoc, so cal_b in ShapePars is the
+    # channel of energy eoc, not of zero energy. Convert.
+    eoc = 0.7 * e_low + 0.3 * e_high
+    ch_at_eoc = (eoc - cal_b) / cal_a
+    pars = ShapePars(noise, fano, ch_at_eoc, 1.0 / cal_a,
+                     tail_amp=tail_amp, tail_len=tail_len,
+                     e_low=e_low, e_high=e_high)
+    if start_pars is not None:
+        # Continue from a converged set - the sum-peak passes only need the
+        # areas re-solved against updated sum lines, not a fresh search.
+        pars.a = np.array(start_pars.a, dtype=float)
+        if not refine_from_start:
+            refine = ()
+
+    # Seed the tail parameters away from the alpha_zero zero-crossing.
+    #
+    # alpha = tail_amp*(alpha_zero + a5^2) with alpha_zero = -0.05, so a5 must
+    # exceed sqrt(0.05) = 0.224 before the tail is even positive. Starting at
+    # a5 = 0 leaves the optimiser sitting in a flat region on the wrong side of
+    # the crossing, where small steps produce no improvement and the tail is
+    # silently never fitted. Seeding at 1.0 puts it in the responsive range.
+    if 'tail' in refine:
+        if pars.a[5] == 0.0:
+            pars.a[5] = 1.0
+        if pars.a[6] == 0.0:
+            pars.a[6] = 1.0
+    if 'contact' in refine:
+        if pars.a[11] <= 0.0:
+            pars.a[11] = 0.03
+    if 'window' in refine:
+        if pars.a[12] <= 0.0:
+            pars.a[12] = 0.02
+    if 'slope' in refine:
+        if pars.a[13] <= 0.0:
+            pars.a[13] = 6.0
+        if pars.a[14] <= 0.0:
+            pars.a[14] = 1.0
+    if 'sumdef' in refine and pars.a[P_PILEUP] == 0.0:
+        pars.a[P_PILEUP] = 0.1          # GeoPIXE's default, percent
+    if 'shelf' in refine:
+        # seed away from zero, or the search cannot move off the boundary
+        if pars.a[8] <= 0.0:
+            pars.a[8] = 0.05
+        if pars.a[9] <= 0.0:
+            pars.a[9] = 1.0
+
+    ch_lo = max(int((e_low - cal_b) / cal_a), 1)
+    ch_hi = min(int((e_high - cal_b) / cal_a), n - 2)
+    channels = np.arange(ch_lo, ch_hi + 1)
+
+    def chi2_of(p):
+        _, _, c2, _, _ = linear_step(counts, background, components, p, channels,
+                                     nonneg=nonneg)
+        return c2
+
+    best = chi2_of(pars)
+    if verbose:
+        print('  start chi2 = %.1f' % best)
+
+    # Coordinate descent on the non-linear parameters. Deliberately simple and
+    # bounded rather than a general optimiser: these parameters are strongly
+    # constrained by the strong peaks, and a wandering optimiser degrades the
+    # weak ones. Steps shrink on failure.
+    groups = {'cal': [(3, 1e-4), (2, 0.05)],       # gain, offset(channel)
+              'width': [(0, 0.2), (1, 0.2)],       # noise, fano
+              'tail': [(5, 0.2), (6, 0.2)],
+              # incomplete-charge-collection shelf: amplitude and the energy
+              # scale over which it decays. Not part of GeoPIXE's model.
+              'shelf': [(8, 0.02), (9, 0.2)],
+              # contact injection from the C1 window's 250 nm Al layer
+              'contact': [(11, 0.02)],
+              # Si3N4 window, nitrogen K-edge injection
+              'window': [(12, 0.02)],
+              # shelf slopes, made energy-dependent rather than fixed
+              'slope': [(13, 0.5), (14, 0.2), (15, 0.2)],
+              # sum-peak energy deficit, percent (sum_peaks.pro's sum_deficit)
+              'sumdef': [(4, 0.05)]}
+    active = []
+    for g in refine:
+        active.extend(groups.get(g, []))
+
+    # Levenberg-Marquardt on the non-linear parameters, with the linear
+    # areas re-solved inside every residual evaluation (variable projection).
+    #
+    # This replaces a coordinate descent that stepped one parameter at a time
+    # and halved the step on failure. That cannot follow a valley: noise and
+    # Fano are strongly correlated - FWHM^2 = noise^2 + fano^2 (E - e_low) -
+    # so moving one alone always looks worse and the search stalls wherever
+    # it started. On run 380001 it converged to chi2 53.6 from the detector
+    # file's widths and 43.3 from a different seed, which is the signature.
+    #
+    # GeoPIXE's pixe.pro fits the same parameters by Marquardt with analytic
+    # derivatives. scipy's trust-region LM with a numerical Jacobian is the
+    # same idea and, for a handful of parameters, costs nothing.
+    idxs = [i for i, _ in active]
+    if idxs:
+        from scipy.optimize import least_squares
+        x0 = np.array([pars.a[i] for i in idxs], dtype=float)
+        lower = [(0.0 if i in (8, 9, 11, 12, 13, 14) else
+                  (1e-4 if i == 4 else -np.inf)) for i in idxs]
+        upper = [(3.0 if i == 4 else np.inf) for i in idxs]
+        # The width is a property of the detector, not of the spectrum, so
+        # it may only move within a factor of two of where it started (the
+        # detector file). Unbounded, a missing element lets the optimiser
+        # broaden every peak to smear over the unexplained one: on run
+        # 380006 an unfitted As Ka took the FWHM at 9 keV from 158 eV to
+        # 343 eV and cost the Au M4/M5 ratio. With the bound the misfit
+        # stays visible as a residual peak, which is where it belongs.
+        for k, i in enumerate(idxs):
+            if i in (0, 1) and x0[k] > 0:
+                lower[k] = 0.5 * x0[k]
+                upper[k] = 2.0 * x0[k]
+
+        # scale each parameter so a unit step is a sensible move in it
+        scale = np.array([max(abs(st), 1e-6) for _, st in active])
+
+        def resid(x):
+            if should_stop is not None and should_stop():
+                raise FitCancelled()
+            trial = ShapePars(pars.a[0], pars.a[1], pars.a[2], pars.a[3],
+                              pars.a[5], pars.a[6], e_low, e_high)
+            trial.a = pars.a.copy()
+            for i, v in zip(idxs, x):
+                trial.a[i] = v
+            # Constrained solve, despite NNLS costing more per evaluation.
+            # An earlier note here claimed the opposite - that the strong
+            # peaks set the shape and NNLS never clips, so nonneg=False
+            # would be faster. Measured on 287424 (47 components, 22 element
+            # groups): nonneg=True 40.4 s, nonneg=False 91.7 s, same final
+            # chi2 of 2.96. Unclipped negative areas let the optimiser
+            # wander through shapes that no non-negative model can reach,
+            # and it takes more iterations to come back than NNLS costs.
+            ar, _, _, _, A = linear_step(counts, background, components,
+                                         trial, channels, nonneg=True)
+            m = A[channels] @ np.maximum(ar, 0.0) + background[channels]
+            return (counts[channels] - m) / np.sqrt(np.maximum(m, 1.0))
+
+        try:
+            sol = least_squares(resid, x0, bounds=(lower, upper),
+                                x_scale=scale, method='trf',
+                                max_nfev=12 * max(len(idxs), 1),
+                                ftol=1e-5, xtol=1e-5)
+            # Score the proposal with the SAME chi2 as the start. The LM
+            # objective (unconstrained solve, negatives clipped) is a proxy;
+            # comparing it against chi2_of - a strict NNLS chi2 - accepted
+            # steps that lowered the proxy and raised the real chi2. With
+            # correlated components (free Kb, the Al artefact) the two part
+            # company: on run 403001 that walked the gain 3.7 % off and doubled
+            # the reported chi2.
+            cand = _copy.deepcopy(pars)
+            for i, v in zip(idxs, sol.x):
+                cand.a[i] = float(v)
+            c2 = chi2_of(cand)
+            if c2 < best:
+                best = c2
+                for i, v in zip(idxs, sol.x):
+                    pars.a[i] = float(v)
+        except FitCancelled:
+            raise
+        except Exception as ex:
+            if verbose:
+                print('  least_squares failed (%s); keeping the start' % ex)
+    if verbose:
+        print('  final chi2 = %.1f' % best)
+
+    areas, errors, chi2, ndf, A = linear_step(counts, background, components,
+                                              pars, channels, nonneg=nonneg)
+    model = A @ np.maximum(areas, 0.0) + background
+    names = [c.name for c in components]
+    # When the background was fitted as a component the 'background' array
+    # here is the zeros it was replaced with. Report the FITTED background -
+    # amplitude times shape - so plots and downstream code see the curve the
+    # model actually used, not an empty line.
+    if fitted_bg is not None:
+        k = components.index(fitted_bg)
+        background = A[:, k] * max(float(areas[k]), 0.0)
+    return FitResult(areas, errors, names, chi2, ndf, model, background,
+                     pars, A)

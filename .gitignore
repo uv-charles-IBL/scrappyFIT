@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.idea/
+.vscode/
+
+# analysis output and scratch
+out/
+exports/
+*.png
+!docs/img/*.png
+
+# large binaries that belong beside the code, not in it
+*.lmf
+*.dam
+*.dai
+
+# GUI run logs
+*.err
+gui_*.log
+
+# The lab's reference spectra are not published (tests/labdata.py). A lab
+# checkout keeps them here untracked; the tests skip or fall back without them.
+tests/data/287424_perovskite.txt
+tests/data/404001_mnox.txt
+tests/data/404003_ga2o3.txt
+tests/data/404004_sic.txt
+tests/data/quartz.txt
+
+# machine-specific paths for Claude sessions (CLAUDE.md, "Local paths")
+CLAUDE.local.md

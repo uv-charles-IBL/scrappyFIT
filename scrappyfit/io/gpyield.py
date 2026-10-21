@@ -1,0 +1,117 @@
+"""Reader for GeoPIXE .yield files (write_yield.pro / read_yield.pro).
+
+IDL XDR again, but note the string convention differs from .dam: an empty
+string is a single zero-length int32, while a non-empty one is written as its
+length twice followed by the padded bytes. Both forms are handled.
+
+What matters here is the layer stack - formula, thickness, density - plus the
+beam energy and the take-off geometry, because those are the inputs a yield
+calculation needs and they are not recorded anywhere else.
+"""
+import numpy as np
+
+
+class _R:
+    def __init__(self, b):
+        self.b, self.p = b, 0
+
+    def i4(self, n=None):
+        if n is None:
+            v = int(np.frombuffer(self.b, '>i4', 1, self.p)[0]); self.p += 4; return v
+        v = np.frombuffer(self.b, '>i4', n, self.p).astype(int); self.p += 4 * n; return v
+
+    def f4(self, n=None):
+        if n is None:
+            v = float(np.frombuffer(self.b, '>f4', 1, self.p)[0]); self.p += 4; return v
+        v = np.frombuffer(self.b, '>f4', n, self.p).astype(float); self.p += 4 * n; return v
+
+    def raw(self, n):
+        """n bytes verbatim, advanced to the next 4-byte boundary."""
+        v = self.b[self.p:self.p + n]
+        self.p += (n + 3) // 4 * 4
+        return v
+
+    def byt(self, n=None):
+        """IDL BYTE. XDR pads out to a 4-byte slot.
+
+        Named byt() rather than b() because self.b is the buffer - a method
+        called b would be shadowed by it and never callable.
+        """
+        if n is None:
+            v = int(self.b[self.p])
+            self.p += 4
+            return v
+        v = np.frombuffer(self.b, 'u1', n, self.p).astype(int)
+        self.p += (n + 3) // 4 * 4
+        return v
+
+    def s(self):
+        n = self.i4()
+        if n == 0:
+            return ''
+        save = self.p
+        n2 = self.i4()
+        if n2 != n:                      # not the doubled form; rewind
+            self.p = save
+        raw = self.b[self.p:self.p + n]
+        self.p += (n + 3) // 4 * 4
+        return raw.decode('latin-1').strip()
+
+    def strarr(self, n):
+        return [self.s() for _ in range(n)]
+
+
+_ATOMIC_MASS = None
+
+
+def _mass_fractions(zlist, atom_frac):
+    """Atom fractions to weight fractions, with the database's masses."""
+    global _ATOMIC_MASS
+    if not zlist:
+        return []
+    if _ATOMIC_MASS is None:
+        from ..physics.gpdb import Database
+        _ATOMIC_MASS = Database().A
+    m = [_ATOMIC_MASS[z] * f for z, f in zip(zlist, atom_frac)]
+    t = sum(m)
+    return [x / t for x in m] if t > 0 else list(atom_frac)
+
+
+def read_yield(path):
+    r = _R(open(path, 'rb').read())
+    version = r.i4()
+    ny = r.i4() if version <= -6 else 1
+    out = []
+    for _ in range(ny):
+        n, nk, nl = r.i4(), r.i4(), r.i4()
+        d = dict(version=version, n=n, nk=nk, nl=nl, title=r.s())
+        d['z2'] = r.i4(n); d['shell'] = r.i4(n); d['n_lines'] = r.i4(n)
+        d['lines'] = r.i4(nk * n)
+        d['intensity'] = r.f4(nk * n); d['e'] = r.f4(nk * n)
+        d['yield'] = r.f4(n * nl).reshape(nl, n)
+        layers = []
+        for _ in range(nl):
+            N = r.i4()
+            Z = r.i4(32); Frac = r.f4(32)
+            thick = r.f4(); name = r.s()
+            # F is the ATOM fraction of each element in the layer - SiO2 is
+            # stored as O 0.667, Si 0.333, and the kimberlite carries H at
+            # 0.173. Handing these to a stopping-power or absorption
+            # routine as weight fractions makes hydrogen 17% of the mass
+            # of a rock and cost every thick-target yield 24%. 'W' is the
+            # weight fraction, which is what Layer() wants.
+            Zl = [int(z) for z in Z[:max(N, 0)]]
+            Fl = [float(f) for f in Frac[:max(N, 0)]]
+            layers.append(dict(N=N, Z=Zl, F=Fl, W=_mass_fractions(Zl, Fl),
+                               thick=thick, name=name))
+        d['layers'] = layers
+        d['unknown'] = r.i4(); d['e_beam'] = r.f4()
+        d['theta'] = r.f4(); d['phi'] = r.f4()
+        d['alpha'] = r.f4(); d['beta'] = r.f4()
+        if version <= -2:
+            d['formula'] = r.strarr(nl)
+            d['weight'] = r.i4(nl); d['thick'] = r.f4(nl)
+            d['microns'] = r.i4(nl); d['density'] = r.f4(nl)
+            d['z1'] = r.i4(); d['a1'] = r.i4(); d['state'] = r.f4()
+        out.append(d)
+    return out

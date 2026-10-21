@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scrappyfit"
+dynamic = ["version"]
+description = "Light-element PIXE spectrum fitting, mapping and quantification"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.20",
+    "scipy>=1.7",
+    "matplotlib>=3.5",
+    "PyQt5>=5.15",
+    "xraylib>=4.1",
+    "xraydb>=4.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-qt>=4.2"]
+
+[project.gui-scripts]
+scrappyfit = "scrappyfit.gui:main"
+
+[project.scripts]
+scrappyfit-cli = "scrappyfit.cli:main"
+
+[project.urls]
+Source = "https://github.com/uv-charles-IBL/scrappyFIT"
+
+[tool.setuptools]
+# THIRD_PARTY_NOTICES.md lists the bundled data files' own licences
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+
+[tool.setuptools.dynamic]
+version = {attr = "scrappyfit.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["scrappyfit*"]
+
+[tool.setuptools.package-data]
+scrappyfit = ["resources/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: full fits (golden spectra, GUI journeys); the pre-commit hook skips them",
+    "gui: journeys that drive the real MainWindow headless (pytest-qt, QT_QPA_PLATFORM=offscreen)",
+]

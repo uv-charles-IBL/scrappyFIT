@@ -1,0 +1,10 @@
+#!/bin/sh
+# Fast test suite before every commit. Enable once per clone:
+#   git config core.hooksPath .githooks
+# The slow tests (golden spectra, GUI journeys) are run by hand: CLAUDE.md, Tests.
+python -m pytest tests/ -q -m "not slow" -x
+status=$?
+if [ $status -ne 0 ]; then
+    echo "pre-commit: fast tests failed; commit aborted." >&2
+fi
+exit $status

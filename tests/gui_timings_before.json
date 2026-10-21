@@ -1,0 +1,22 @@
+{
+ "J1.calibrate": 119.1,
+ "J1.fit": 7132.5,
+ "J1.load": 201.3,
+ "J1.pick": 1.2,
+ "J2.drop_F": 1.3,
+ "J2.fit": 6961.4,
+ "J2.range": 0.3,
+ "J2.refit_noF": 2136.4,
+ "J2.refit_range": 831.8,
+ "J3.detector": 120.7,
+ "J3.efficiency": 1.0,
+ "J3.export": 36.5,
+ "J3.export_yield": 45.8,
+ "J3.fit": 20296.7,
+ "J3.quantify": 24.2,
+ "J4.batch": 27631.1,
+ "J5.fit1": 6986.1,
+ "J5.fit2": 6950.7,
+ "J5.open1": 129.4,
+ "J5.open2": 133.2
+}

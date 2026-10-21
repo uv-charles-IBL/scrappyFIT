@@ -1,0 +1,72 @@
+; Supplementary X-ray line list for the ultra-light elements.
+;
+; GeoPIXE's main line database, 'xray_lines.txt', begins at carbon. Lithium,
+; beryllium and boron have no entries at all, so 'e_line' returns 0.0 for them
+; and 'get_lines' drops them silently. This file adds them.
+;
+; It is loaded by 'init_xray_lines_light', which merges these values into the
+; 'c_xray' common AFTER 'init_xray_lines' has read the main table. Nothing in
+; 'xray_lines.txt' is modified, and 'geopixe2.sav' does not need rebuilding -
+; the supplement is applied at run time.
+;
+; ---------------------------------------------------------------------------
+; Provenance
+;
+; Energies and intensities are taken from the Elam database that already ships
+; with GeoPIXE ('ElamDB12.txt'), so they are consistent with the C, N, O and F
+; values already in 'xray_lines.txt'.
+;
+;   Elam, Ravel & Sieber (2002), Radiat. Phys. Chem. 63, 121-128.
+;
+; The Ka1/Ka2 doublet is unresolvable at these energies and Ka3 is negligible,
+; so following the convention already used for carbon in 'xray_lines.txt',
+; the whole K-alpha group is carried as a single Ka1 line with unit intensity,
+; and mirrored into the Ka_ group entry.
+;
+;   Elam raw values (eV):
+;     Li  K-L1 (Ka3)  49.4    intensity 1.000000
+;     Be  K-L1 (Ka3) 103.5    intensity 0.0000487
+;         K-L2 (Ka2) 108.5    intensity 0.334205
+;         K-L3 (Ka1) 108.5    intensity 0.665747
+;     B   K-L1 (Ka3) 175.4    intensity 0.0000609
+;         K-L2 (Ka2) 183.3    intensity 0.334201
+;         K-L3 (Ka1) 183.3    intensity 0.665738
+;
+; NOTE on lithium. Elam gives the free-atom K-L1 transition at 49.4 eV. In a
+; solid, Li K emission is a valence band and is quoted near 54.3 eV - the
+; value used by Llovet et al., Microsc. Microanal. 29 (2023) 540, alongside
+; Be K at 108.5 eV.
+;
+; The SOLID-STATE value 54.3 eV is used here, on instruction: these are
+; condensed-matter targets, and at ~50 eV detector resolution in this range
+; the 5 eV difference is well inside one resolution element anyway. Revert to
+; 0.049400 for free-atom work; it is a one-line edit and needs no rebuild.
+;
+; ---------------------------------------------------------------------------
+; Format:  'line'  <element>  <mnemonic>  <energy keV>  <relative intensity>
+;          'edge'  <element>  <shell>     <energy keV>
+;
+; Comments start with ';' or '#'. Blank lines ignored.
+; ---------------------------------------------------------------------------
+
+line   Li   Ka1    0.054300   1.000000
+line   Li   Ka_    0.054300   1.000000
+
+line   Be   Ka1    0.108500   1.000000
+line   Be   Ka_    0.108500   1.000000
+
+line   B    Ka1    0.183300   1.000000
+line   B    Ka_    0.183300   1.000000
+
+; ---------------------------------------------------------------------------
+; Edge correction.
+;
+; 'edge.txt' carries the beryllium K edge as 11.0 eV. Every other tabulation,
+; including the Elam database shipped alongside it, puts it at 111.5 eV - the
+; shipped value has lost a digit. Left uncorrected, 'absco' and 'jump_ratio'
+; treat Be as having no K edge anywhere near its own emission line.
+;
+; Verify against ElamDB12.txt ("Edge K 1.11500e+02") before trusting this.
+; ---------------------------------------------------------------------------
+
+edge   Be   K      0.111500
