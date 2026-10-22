@@ -87,7 +87,20 @@ def test_inv_small_matches_pinv_with_empty_components():
     M = X.T @ X
     got = _inv_small(M)
     ref = np.linalg.pinv(M)
-    assert np.allclose(got, ref, rtol=1e-7, atol=1e-12 * np.abs(ref).max())
+    live = [i for i in range(M.shape[0]) if M[i, i] != 0]
+    Mk = M[np.ix_(live, live)]
+    # pinv works by SVD on the unscaled matrix, so its error is normwise:
+    # about cond x eps x max|inverse|. With columns scaled 1 to 1e4 the
+    # inverse's entries span about 1e8, so an elementwise rtol cannot bound
+    # it on small entries; the comparison with rtol 1e-7 failed on CI's Linux
+    # Python 3.10 leg (master 0ae6fb1, 2026-10-21). Compare normwise instead.
+    bound = 100 * np.linalg.cond(Mk) * np.finfo(float).eps * np.abs(ref).max()
+    assert np.abs(got - ref).max() <= bound
+    # The accuracy check that needs no reference inverse: M x inv = I on the
+    # live block. On this test's matrix (lab desktop, 2026-10-21) it is
+    # 1.8e-12 for _inv_small and 2.0e-9 for pinv; the bound is for this matrix.
+    gk = got[np.ix_(live, live)]
+    assert np.abs(Mk @ gk - np.eye(len(live))).max() < 1e-9
     assert not got[:, [3, 8]].any() and not got[[3, 8], :].any()
 
 
