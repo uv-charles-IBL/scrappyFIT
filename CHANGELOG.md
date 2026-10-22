@@ -55,6 +55,17 @@ reproducible against a stated version.
   range, or the DA matrix's elements) in the element dialog's layout; each cell shows the shells it
   can map, one click maps a single shell and a cell with several asks which (`Fe` / `Fe L`). GeoPIXE
   picks from a droplist only (`gimage.pro:1636-1647`). `gui/maplines.py`.
+- **Associations...** plots one map against another as GeoPIXE's Element Associations (`corr.pro`;
+  geopixe-ref 2026-10-21): a 2-D histogram of the two maps' pixel values (made as the Maps tab makes
+  them: same kind, background and binning), density in log colour, optional log axes 5 decades deep,
+  negatives clipped to 0, range 1.05 x the maximum inside a 2 % border, and Pearson r. A polygon drawn
+  round a cluster selects every pixel whose point lies inside (GeoPIXE tests the histogram bin; here
+  the pixel's own point, so the selection does not depend on the bins) and replaces, adds to, refines
+  (AND) or takes from the mask, after GeoPIXE's include / refine / reject (whether its reject takes
+  from the current selection or the field was not checked). Every pixel is on the plot: a hot pixel
+  in the border sits on the top edge. Pearson r is of the values as plotted (negatives at 0). Window maps are not divided by
+  a charge map as GeoPIXE's axes are (no charge map here yet). `analysis/association.py`,
+  `gui/association.py`.
 
 ## 0.26.0 - 2026-10-21: spectrum display, Sabbatucci-Salvat fetched on first use
 

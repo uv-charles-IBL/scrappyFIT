@@ -332,6 +332,16 @@ last row and column of the map partial: at binning 3 they hold one raster
 column, so a window map reads about a third as high there and a percentile
 mask passes them over. A DA map is per unit charge and reads normally.
 
+**Associations...** plots one map against another (pick x and y, then
+**Plot**): every pixel is a point, drawn as a 2-D histogram with the density in
+log colour, and Pearson r is reported. A phase is a cluster; click round it (click
+the first corner to close) and every pixel in it becomes the mask, wherever it
+lies on the map, which no shape drawn on the map can do. The box above the plot
+says what the region does: replace the mask, add to it, refine it (keep only
+pixels in both) or take from it. The maps are made as the Maps tab would make
+them: same kind (window or DA), background and binning. Tick **log** on an axis
+whose values span decades.
+
 The active mask is drawn on the map (light tint, cyan outline). **grow** and
 **shrink** move its edge by one displayed pixel (the binning: 4 raster pixels
 at the default) whichever tool made it, so a rectangle stays a rectangle.

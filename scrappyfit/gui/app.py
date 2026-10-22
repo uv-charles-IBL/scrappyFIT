@@ -418,6 +418,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # a draw queued now would run after the canvases are deleted
         self.spec.cancel_draws()
         self.map.cancel_draws()
+        if getattr(self, 'assocview', None) is not None:
+            self.assocview.canvas.cancel_draws()
         log_event('window closed')
         super().closeEvent(ev)
 
@@ -958,6 +960,12 @@ class MainWindow(QtWidgets.QMainWindow):
                          'beside it if one is set')
         b_exp.clicked.connect(self.on_export_map)
         row3.addWidget(b_exp)
+        b_assoc = QtWidgets.QPushButton('Associations...')
+        b_assoc.setToolTip('Plot one map against another; a region drawn on '
+                           'the plot selects those pixels as the mask '
+                           "(GeoPIXE's Element Associations)")
+        b_assoc.clicked.connect(self.on_associations)
+        row3.addWidget(b_assoc)
         row3.addStretch(1)
         self.map = MapCanvas()
         self.map_toolbar = toolbar_for(self.map, mw)
@@ -1117,6 +1125,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # a new file drops any DA matrix (Session.reset_data) unless it IS
         # one: the Maps row follows at once, not at the next Show map
         self._sync_map_kind(prefer_da=self.session.dam is not None)
+        if getattr(self, 'assocview', None) is not None:
+            self.assocview.reset()
         s = self.session
         self.lbl_file.setText('%s\n%s' % (os.path.basename(path), s.label))
         self.ed_gain.setText('%.7f' % s.cal[0])
@@ -1636,6 +1646,73 @@ class MainWindow(QtWidgets.QMainWindow):
         if picked:
             self.cmb_mapel.setCurrentText(picked[-1])
             self.on_map()
+
+    @user_action
+    def on_associations(self):
+        """Element association plot (gui/association.py) over maps made as
+        the Maps tab makes them: same kind, background and binning."""
+        s = self.session
+        if s.events is None:
+            self.say('Associations need a list-mode (.lmf) file.')
+            return
+        from .association import AssociationDialog
+        lines = [self.cmb_mapel.itemText(i)
+                 for i in range(self.cmb_mapel.count())]
+        d = getattr(self, 'assocview', None)
+        if d is None:
+            d = self.assocview = AssociationDialog(lines, self._assoc_map,
+                                                   self)
+            d.maskSelected.connect(self.on_assoc_mask)
+        else:
+            d.set_lines(lines)
+        d.show()
+        d.raise_()
+
+    def _assoc_map(self, name):
+        """(map, title, units, binning) for the association plot. The
+        Maps tab's map_info still describes the map it shows."""
+        s = self.session
+        b = self.spin_bin.value()
+        shown = s.map_info
+        try:
+            if self.cmb_kind.currentText() == MAP_KINDS[1]:
+                m = s.da_map(name, binning=b)
+            else:
+                m = s.element_map(name, binning=b,
+                                  background=self.cmb_bg.currentData())
+            info = dict(s.map_info)
+        finally:
+            s.map_info = shown
+        return m, '%s %s' % (name, map_kind_short(info)), info['units'], b
+
+    @user_action
+    def on_assoc_mask(self, m, name, op, binning):
+        """A region drawn on the association plot: its pixels, as a mask,
+        combined with the current one by op ('replace', 'add', 'and',
+        'subtract'), at the binning of the plotted maps. With no mask set,
+        add and refine make the region itself and subtract takes it from
+        the whole field, as the Maps tab's own ops (_apply_mask)."""
+        s = self.session
+        try:
+            r = MSK.to_raster(m, 256, binning)
+        except ValueError as ex:
+            self.say('MASK FAILED: %s' % ex)
+            return
+        cur = s.mask
+        if cur is None and op in ('add', 'and'):
+            op = 'replace'
+        if op != 'replace':
+            if cur is None:
+                cur = np.ones((256, 256), dtype=bool)
+            r = MSK.combine(cur, r, {'add': 'or', 'and': 'and',
+                                     'subtract': 'sub'}[op])
+            name = '%s%s%s' % (s.mask_name or 'field',
+                               {'add': '+', 'and': '&', 'subtract': '-'}[op],
+                               name)
+        if not r.any():
+            self.say('That would leave an empty mask - mask kept.')
+            return
+        self._apply_mask(r, name, combine=False)
 
     @user_action
     def on_map_step(self, step):
