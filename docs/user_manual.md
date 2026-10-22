@@ -64,7 +64,7 @@ pip install "scrappyfit @ git+https://github.com/uv-charles-IBL/scrappyFIT@vX.Y.
 
 ### Dependencies
 
-`numpy`, `scipy`, `matplotlib`, `PyQt5`, `xraylib`, `xraydb`. All available
+`numpy`, `scipy`, `matplotlib`, `PyQt5`, `xraylib`, `xraydb`, `threadpoolctl`. All available
 from PyPI and installed by pip.
 
 ### Without the window

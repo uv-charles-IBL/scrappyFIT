@@ -59,5 +59,6 @@ not under scrappyFIT's MIT licence. The rest of those releases is unaffected.
 ## Python dependencies
 
 These are installed by pip and not bundled: numpy, scipy and matplotlib (BSD-style), PyQt5
-(GPL-3.0 or Riverbank commercial), xraylib (BSD-3-Clause) and xraydb (MIT). PyQt5 is
+(GPL-3.0 or Riverbank commercial), xraylib (BSD-3-Clause), xraydb (MIT) and threadpoolctl
+(BSD-3-Clause). PyQt5 is
 GPL. If you distribute a frozen application that bundles it, GPL terms apply to that bundle.

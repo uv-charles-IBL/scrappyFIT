@@ -22,6 +22,9 @@ anywhere else.
     P.R. Bevington (1969), Data Reduction and Error Analysis.
 """
 
+import contextlib
+import threading
+
 import numpy as np
 
 import copy as _copy
@@ -584,6 +587,121 @@ class FitResult:
         return '\n'.join(out)
 
 
+# Small linear algebra without BLAS.
+#
+# numpy hands matrix products, inv, pinv and lstsq to OpenBLAS, which splits
+# them over threads. For the linear step's problem (a few thousand channels x
+# up to ~50 components) the bits it returns depend on the thread count: on the
+# lab desktop the Gram product, inv, pinv and lstsq of 287424's 50-component
+# system all changed between OMP_NUM_THREADS=1, 4 and 16, and the quartz fit's
+# chi2 moved in the fifth digit (BUGS.md, 2026-10-20). At 16 threads a 47x47
+# inv also cost 2-21 ms against 0.03 ms on one thread.
+#
+# These helpers do the same arithmetic in numpy's own loops: einsum without
+# optimize= never calls BLAS, and the Gauss-Jordan inverse is elementwise
+# work only, so the result is one answer whatever the thread setting.
+
+def _gram(A, B):
+    """A.T @ B, summed in numpy's loops rather than BLAS."""
+    return np.einsum('ki,kj->ij', A, B)
+
+
+def _matvec(A, x):
+    """A @ x for a 2-D A, summed in numpy's loops rather than BLAS."""
+    return np.einsum('ij,j->i', A, x)
+
+
+def _inv_small(M):
+    """Inverse of a small Gram matrix, by Gauss-Jordan with partial pivoting.
+
+    A component with no counts anywhere in the fit range (an empty pile-up
+    or sum term, say) gives an all-zero row and column. It is left out of the
+    inverse and gets zero variance, as np.linalg.pinv gave it before (the
+    quartz recipe has two). Unlike pinv, a nearly singular remainder is not
+    truncated: it is inverted as np.linalg.inv would. Any other exactly
+    singular matrix raises LinAlgError, as np.linalg.inv does, and the caller
+    falls back to pinv.
+
+    The matrix is equilibrated first (scaled to unit diagonal, and the
+    scaling undone after). Gauss-Jordan is less accurate than LAPACK's LU on
+    an ill-conditioned matrix (287424's has cond 2e15), so solve with
+    _solve_small, which adds one step of iterative refinement.
+    """
+    live = np.flatnonzero(np.diag(M) != 0.0)
+    n = len(live)
+    d = 1.0 / np.sqrt(np.abs(np.diag(M)[live]))
+    a = np.hstack([M[np.ix_(live, live)] * np.multiply.outer(d, d), np.eye(n)])
+    for k in range(n):
+        p = k + int(np.argmax(np.abs(a[k:, k])))
+        if a[p, k] == 0.0:
+            raise np.linalg.LinAlgError('singular matrix')
+        if p != k:
+            a[[k, p]] = a[[p, k]]
+        a[k] /= a[k, k]
+        f = a[:, k].copy()
+        f[k] = 0.0
+        a -= np.multiply.outer(f, a[k])
+    out = np.zeros_like(M)
+    out[np.ix_(live, live)] = a[:, n:] * np.multiply.outer(d, d)
+    return out
+
+
+def _solve_small(C, M, v):
+    """x = M^-1 v from C = _inv_small(M), with one step of iterative
+    refinement. On a Gram matrix captured from the 287424 golden fit, with a
+    synthetic right-hand side, this takes ||Mx - v|| / ||v|| from 9e-13 to
+    2e-16; inside the real fits it is 2e-16 (quartz) and 7e-16 (287424), as
+    np.linalg.solve (scratch accuracy.py, 2026-10-21)."""
+    x = _matvec(C, v)
+    return x + _matvec(C, v - _matvec(M, x))
+
+
+_BLAS = None
+_BLAS_LOCK = threading.Lock()
+_BLAS_HOLD = {'count': 0, 'limiter': None}
+
+
+def _blas_controller():
+    """The threadpoolctl controller, built once, on first use: after scipy
+    has loaded its own OpenBLAS, so both copies are seen. Called outside any
+    try in fit_spectrum, so a missing threadpoolctl fails loudly instead of
+    being taken for a failed optimisation."""
+    global _BLAS
+    if _BLAS is None:
+        from threadpoolctl import ThreadpoolController
+        _BLAS = ThreadpoolController()
+    return _BLAS
+
+
+@contextlib.contextmanager
+def _one_blas_thread():
+    """Hold every loaded BLAS (numpy's and scipy's OpenBLAS) to one thread.
+
+    For scipy's least_squares, whose trust-region steps multiply the
+    Jacobian through BLAS: J.dot and J.T.dot on a few-thousand x 6 Jacobian
+    gave different bits at 1 and 16 threads, enough to move the quartz
+    chi2r in the seventh digit (scratch case.py, 2026-10-21).
+
+    The limit is process-wide: while it is held, BLAS calls from any other
+    thread in the process (a map being computed beside a fit, say) also run
+    on one thread. It is reference-counted, so of two fits running at once
+    the first to finish does not lift the limit under the other.
+    """
+    with _BLAS_LOCK:
+        if _BLAS_HOLD['count'] == 0:
+            _BLAS_HOLD['limiter'] = _blas_controller().limit(
+                limits=1, user_api='blas')
+        _BLAS_HOLD['count'] += 1
+    try:
+        yield
+    finally:
+        with _BLAS_LOCK:
+            _BLAS_HOLD['count'] -= 1
+            if _BLAS_HOLD['count'] == 0:
+                _BLAS_HOLD['limiter'].restore_original_limits()
+                _BLAS_HOLD['limiter'] = None
+
+
 def _weights(model, floor=1.0):
     """Awaya weights: variance from the model, floored so empty channels
     cannot dominate."""
@@ -671,11 +789,13 @@ def _linear_step_free(counts, background, components, pars, channels,
             groups.setdefault(g, []).append((i, float(f)))
     prior_rows, prior_rhs, prior_w = [], [], []
     if groups:
-        # a first unconstrained pass sets the scale of each group
+        # a first unconstrained pass sets the scale of each group (normal
+        # equations, like the main solve below, rather than BLAS lstsq)
         w0 = _weights(np.maximum(counts[channels], 1.0))
+        Aw0 = Ac * w0[:, None]
         try:
-            a0 = np.linalg.lstsq(Ac * np.sqrt(w0)[:, None],
-                                 yc * np.sqrt(w0), rcond=None)[0]
+            G0 = _gram(Ac, Aw0)
+            a0 = _solve_small(_inv_small(G0), G0, _matvec(Aw0.T, yc))
         except Exception:
             a0 = np.zeros(A.shape[1])
         for g, members in groups.items():
@@ -709,18 +829,18 @@ def _linear_step_free(counts, background, components, pars, channels,
         if prior_rows:
             w = np.concatenate([w, prior_w])
         Aw = Ac * w[:, None]
-        M = Ac.T @ Aw
-        v = Aw.T @ yc
+        M = _gram(Ac, Aw)
+        v = _matvec(Aw.T, yc)
         try:
-            cov = np.linalg.inv(M)
+            cov = _inv_small(M)
         except np.linalg.LinAlgError:
-            cov = np.linalg.pinv(M)
+            cov = np.linalg.pinv(M)     # BLAS, thread-dependent; rare
         if nonneg == 'strict':
             from scipy.optimize import nnls
             sw = np.sqrt(w)
             areas, _ = nnls(Ac * sw[:, None], yc * sw)
         else:
-            areas = cov @ v
+            areas = _solve_small(cov, M, v)
         if nonneg:
             # one round of clipping: drop negatives and re-solve on the rest.
             # Negative areas are physically meaningless but ARE informative -
@@ -729,13 +849,13 @@ def _linear_step_free(counts, background, components, pars, channels,
             areas_w = np.maximum(areas, 0.0)
         else:
             areas_w = areas
-        model = np.maximum((Ac @ areas_w)[:len(channels)]
+        model = np.maximum(_matvec(Ac, areas_w)[:len(channels)]
                            + background[channels], 1.0)
 
     # chi2 over the DATA rows only; the prior rows are a regulariser, not
     # a measurement, and must not be reported as goodness of fit
     nd = len(channels)
-    resid = yc[:nd] - Ac[:nd] @ areas
+    resid = yc[:nd] - _matvec(Ac[:nd], areas)
     w = _weights(model)
     chi2 = float(np.sum(w * resid ** 2))
     ndf = len(channels) - len(components)
@@ -883,6 +1003,7 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
     idxs = [i for i, _ in active]
     if idxs:
         from scipy.optimize import least_squares
+        _blas_controller()          # outside the try: no threadpoolctl is an error
         x0 = np.array([pars.a[i] for i in idxs], dtype=float)
         lower = [(0.0 if i in (8, 9, 11, 12, 13, 14) else
                   (1e-4 if i == 4 else -np.inf)) for i in idxs]
@@ -920,14 +1041,15 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
             # and it takes more iterations to come back than NNLS costs.
             ar, _, _, _, A = linear_step(counts, background, components,
                                          trial, channels, nonneg=True)
-            m = A[channels] @ np.maximum(ar, 0.0) + background[channels]
+            m = _matvec(A[channels], np.maximum(ar, 0.0)) + background[channels]
             return (counts[channels] - m) / np.sqrt(np.maximum(m, 1.0))
 
         try:
-            sol = least_squares(resid, x0, bounds=(lower, upper),
-                                x_scale=scale, method='trf',
-                                max_nfev=12 * max(len(idxs), 1),
-                                ftol=1e-5, xtol=1e-5)
+            with _one_blas_thread():
+                sol = least_squares(resid, x0, bounds=(lower, upper),
+                                    x_scale=scale, method='trf',
+                                    max_nfev=12 * max(len(idxs), 1),
+                                    ftol=1e-5, xtol=1e-5)
             # Score the proposal with the SAME chi2 as the start. The LM
             # objective (unconstrained solve, negatives clipped) is a proxy;
             # comparing it against chi2_of - a strict NNLS chi2 - accepted
@@ -953,7 +1075,7 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
 
     areas, errors, chi2, ndf, A = linear_step(counts, background, components,
                                               pars, channels, nonneg=nonneg)
-    model = A @ np.maximum(areas, 0.0) + background
+    model = _matvec(A, np.maximum(areas, 0.0)) + background
     names = [c.name for c in components]
     # When the background was fitted as a component the 'background' array
     # here is the zeros it was replaced with. Report the FITTED background -
