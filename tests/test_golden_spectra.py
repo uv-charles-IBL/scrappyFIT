@@ -17,6 +17,8 @@ exactly for that reason.
 Pinned 2026-10-18 from master 6c0718b with this file's recipes. Re-pinned
 2026-10-21 on fix/blas-threads (thread-independent fits): 287424 in full,
 404003 in full, 404004 Fano; quartz and 404001 unchanged (CHANGELOG).
+Re-pinned 2026-10-22 on fix/fit-loop-speed (analytic Jacobian): 404003 and
+404004 in full; 287424, quartz and 404001 unchanged (CHANGELOG).
 """
 import math
 import os
@@ -210,39 +212,39 @@ EXPECTED = {
             'Cl':                   (308.6311, 44.92),
         }),  # not pinned (area < 4 sigma): K
     '404003_ga2o3': dict(
-        chi2r=1.35018,
-        pars=(38.1036, 25.0451, 1201.62, 510.053),
+        chi2r=1.3485,
+        pars=(38.086, 25.0018, 1201.59, 510.053),
         areas={
             # Al Kb/Ka = 2.524 x 0.013 = 0.033; the table's 0.013 is too low
             # for solids (BUGS.md "Si and Al Kb/Ka"), which is why Kb is free.
-            'AlKb':                 (1363270, 4.655e+04),
-            'Al':                   (555028.3, 873.8),
-            'GaL':                  (125181.3, 394.3),
-            'O':                    (65828.28, 272.4),
-            'AuM5':                 (39112.67, 239),
-            'AuM4':                 (22203.59, 203.8),
-            'Ti':                   (7153.517, 85.9),
-            'AuM3':                 (3764.421, 129.8),
-            'AuMz':                 (2307.723, 124.4),
-            'N':                    (1537.792, 71.55),
-            'AuM2':                 (999.222, 107.2),
-            'Si':                   (720.6023, 83.04),
+            'AlKb':                 (1394284, 4.658e+04),
+            'Al':                   (554658.4, 873.5),
+            'GaL':                  (125163.5, 394.2),
+            'O':                    (65816.52, 272.4),
+            'AuM5':                 (39073.85, 238.8),
+            'AuM4':                 (22232.04, 203.7),
+            'Ti':                   (7152.496, 85.89),
+            'AuM3':                 (3759.397, 129.6),
+            'AuMz':                 (2283.414, 124.3),
+            'N':                    (1535.158, 71.51),
+            'AuM2':                 (998.5574, 107.1),
+            'Si':                   (722.9908, 82.98),
         }),  # not pinned (area < 4 sigma): AuM1, C
     '404004_sic': dict(
-        chi2r=1.9944,
-        pars=(40.9898, 21.9466, 1200.22, 506.165),
+        chi2r=1.99431,
+        pars=(40.9876, 21.9043, 1200.22, 506.165),
         areas={
             # Si Kb/Ka = 1.578 x 0.0273 = 0.043, the measured solid value; the
             # table's 0.027 is WRONG for solids (BUGS.md "Si and Al Kb/Ka").
-            'SiKb':                 (3414312, 2.037e+04),
+            'SiKb':                 (3414313, 2.037e+04),
             'Si':                   (2163862, 1555),
             # Si+Si pile-up is a flat-topped hump the sum model misfits
             # (methods/pixe-fitting-scrappyfit.md, sum_deficit_spread).
-            'pileup':               (4510.373, 71.07),
+            'pileup':               (4510.432, 71.07),
             # C/Si implies 0.51x the file's C efficiency; corrected value
             # depends on omega_K (findings/c1-efficiency-model-inconsistency.md).
-            'C':                    (2002.547, 66.46),
-            'pileup plateau':       (1501.021, 87.17),
+            'C':                    (2002.534, 66.46),
+            'pileup plateau':       (1500.941, 87.17),
         }),  # not pinned (area < 4 sigma): Al
     '287424_perovskite': dict(
         # Relative regression only: the absolute scale on this run is biased

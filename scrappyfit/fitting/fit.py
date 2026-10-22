@@ -29,8 +29,30 @@ import numpy as np
 
 import copy as _copy
 
-from .peakshape import (P_FANO, P_NOISE, P_PILEUP, ShapePars,  # noqa: F401
-                        erfc_saturated, line_profile)
+from .peakshape import (JAC_PARAMS, P_FANO, P_NOISE, P_PILEUP,  # noqa: F401
+                        ShapePars, erfc_saturated, line_profile,
+                        line_profile_jac)
+
+
+def _fd_step(v):
+    """Forward-difference step for a parameter of value v: scipy's 2-point
+    choice, sqrt(eps) relative."""
+    return np.sqrt(np.finfo(float).eps) * max(1.0, abs(float(v)))
+
+
+def _fd_profile_jac(profile, pars, idxs, f0):
+    """{i: d profile / d a_i} by forward differences of one component's
+    profile, for the parameters with no analytic derivative. Costs one
+    profile of that component per parameter, not a whole linear step."""
+    d = {}
+    for i in idxs:
+        h = _fd_step(pars.a[i])
+        q = _copy.copy(pars)
+        q.a = np.array(pars.a, dtype=float)
+        q.a[i] = pars.a[i] + h
+        h = q.a[i] - pars.a[i]               # the step actually taken
+        d[i] = (profile(q) - f0) / h
+    return d
 
 
 class FitCancelled(Exception):
@@ -62,6 +84,44 @@ class Component:
 
     def profile(self, pars, n_channels, do_tail=True):
         return self._profile_of(self.lines, pars, n_channels, do_tail)
+
+    def profile_jac(self, pars, n_channels, idxs, do_tail=True):
+        """(profile, {i: d profile / d a_i}). The profile is profile()'s
+        array exactly. Both shapes are differentiated analytically: line.pro's
+        by peakshape.line_profile_jac, the measured response by
+        hypermet.line_profile_jac; any parameter without an analytic form by
+        forward differences."""
+        idxs = list(idxs)
+        if self.response is not None:
+            from .hypermet import line_profile_jac as _hyp_jac
+            f = np.zeros(n_channels)
+            d = {i: np.zeros(n_channels) for i in idxs}
+            for E, beta in self.lines:
+                fl, dl = _hyp_jac(E, beta, pars, n_channels, self.response, idxs)
+                f += fl
+                for i in idxs:
+                    d[i] += dl[i]
+            return f, d
+        an = [i for i in idxs if i in JAC_PARAMS]
+        f = np.zeros(n_channels)
+        d = {i: np.zeros(n_channels) for i in an}
+        for E, beta in self.lines:
+            ta = self.tail_amp_fn(E) if self.tail_amp_fn else 0.0
+            tl = self.tail_len_fn(E) if self.tail_len_fn else 0.0
+            fl, dl = line_profile_jac(E, beta, pars, n_channels, an,
+                                      tail_amp=ta, tail_len=tl,
+                                      beta_tail=self.beta_tail,
+                                      do_tail=do_tail)
+            f += fl
+            for i in an:
+                d[i] += dl[i]
+        # the sum-peak deficit does not touch an element's own lines
+        d.update({i: np.zeros(n_channels) for i in idxs if i == P_PILEUP})
+        rest = [i for i in idxs if i not in d]
+        if rest:
+            d.update(_fd_profile_jac(
+                lambda q: self.profile(q, n_channels, do_tail), pars, rest, f))
+        return f, d
 
     def escape_profile(self, pars, n_channels, do_tail=True):
         """The escape lines' share of profile(), for display: profile() is
@@ -163,6 +223,10 @@ class BackgroundComponent:
         if len(b) < n_channels:
             b = np.pad(b, (0, n_channels - len(b)))
         return b[:n_channels]
+
+    def profile_jac(self, pars, n_channels, idxs):
+        f = self.profile(pars, n_channels)
+        return f, {i: np.zeros(n_channels) for i in idxs}
 
 
 class SumPeakComponent:
@@ -351,6 +415,61 @@ class SumPeakComponent:
         t = f.sum()
         return f / t if t > 0 else f
 
+    def profile_jac(self, pars, n_channels, idxs):
+        """(profile, {i: d profile / d a_i}); the profile is profile()'s
+        exactly. Analytic through line_profile_jac: the width factor scales
+        the noise and Fano derivatives, and the deficit a4 (when refined,
+        i.e. non-zero) moves each line's energy by -e/100 per percent. The
+        unit-area normalisation is differentiated too."""
+        idxs = list(idxs)
+        f = np.zeros(n_channels)
+        if not self._lines:
+            return f, {i: np.zeros(n_channels) for i in idxs}
+        d4 = pars.a[P_PILEUP] != 0.0
+        d = float(pars.a[P_PILEUP]) if d4 else self.sum_deficit
+        shift = 1.0 - d / 100.0
+        wf = self.width_factor
+        wide = pars
+        if wf != 1.0:
+            wide = _copy.copy(pars)
+            wide.a = np.array(pars.a, dtype=float)
+            wide.a[P_NOISE] *= wf
+            wide.a[P_FANO] *= wf
+        spread = float(getattr(self, 'deficit_spread', 0.0))
+        shifts = ([shift] if spread <= 0 else
+                  list(1.0 - (d + np.linspace(0.0, spread, 9)) / 100.0))
+        an = [i for i in idxs if i in JAC_PARAMS]
+        D = {i: np.zeros(n_channels) for i in an}
+        D4 = np.zeros(n_channels) if (P_PILEUP in idxs) else None
+        seen = {}
+        for e, w in self._lines:
+            for sh in shifts:
+                key = (sh * e, w / len(shifts))
+                got = seen.get(key)
+                if got is None:
+                    got = seen[key] = line_profile_jac(
+                        key[0], key[1], wide, n_channels, an, do_tail=False,
+                        energy=D4 is not None and d4)
+                p, dp = got
+                f += p
+                for i in an:
+                    D[i] += dp[i] * (wf if i in (P_NOISE, P_FANO) else 1.0)
+                if D4 is not None and d4:
+                    D4 += dp['E'] * (-e / 100.0)
+        if D4 is not None:
+            D[P_PILEUP] = D4
+        t = f.sum()
+        rest = [i for i in idxs if i not in D]
+        if t > 0:
+            F = f / t
+            D = {i: (g - F * g.sum()) / t for i, g in D.items()}
+        else:
+            F = f
+        if rest:
+            D.update(_fd_profile_jac(lambda q: self.profile(q, n_channels),
+                                     pars, rest, F))
+        return F, D
+
 
 class PileupPlateauComponent:
     """Partial pile-up: two pulses arriving offset in time within the shaping
@@ -417,6 +536,17 @@ class PileupPlateauComponent:
             f[i0:i1] += w * box
         t = f.sum()
         return f / t if t > 0 else f
+
+    def profile_jac(self, pars, n_channels, idxs):
+        """(profile, {i: d profile / d a_i}). The boxes move with the
+        calibration and width only (a0-a3); those are differenced, one
+        plateau profile each, and everything else is zero."""
+        f = self.profile(pars, n_channels)
+        moving = [i for i in idxs if i in (0, 1, 2, 3)]
+        d = _fd_profile_jac(lambda q: self.profile(q, n_channels), pars,
+                            moving, f)
+        d.update({i: np.zeros(n_channels) for i in idxs if i not in d})
+        return f, d
 
 
 class SubThresholdPileupComponent:
@@ -500,6 +630,11 @@ class SubThresholdPileupComponent:
         if self._shape is None or len(self._shape) != n_channels:
             return np.zeros(n_channels)
         return self._shape
+
+    def profile_jac(self, pars, n_channels, idxs):
+        # the shape is fixed between passes (update()), not by the fit
+        f = self.profile(pars, n_channels)
+        return f, {i: np.zeros(n_channels) for i in idxs}
 
 
 class FitResult:
@@ -709,7 +844,7 @@ def _weights(model, floor=1.0):
 
 
 def linear_step(counts, background, components, pars, channels,
-                n_iter=3, nonneg=True):
+                n_iter=3, nonneg=True, A=None, info=None):
     """Solve for areas, honouring any component that declares a max_area.
 
     A capped component is solved unbounded first. If it comes back over its
@@ -717,12 +852,22 @@ def linear_step(counts, background, components, pars, channels,
     and still have to be accounted for - moved into the background, and the
     remaining components re-solved against what is left. The degrees of
     freedom drop accordingly, since a pinned component is no longer fitted.
+
+    A, if given, is the profile matrix column_stack([c.profile(pars, n)]),
+    already built (residual_jacobian builds it with the derivatives). info,
+    if a dict, receives what the solve used, for residual_jacobian: 'over'
+    (pinned index -> cap), 'keep' (the indices solved) and the solve's
+    internals under 'free' (see _linear_step_free).
     """
     caps = {i: c.max_area for i, c in enumerate(components)
             if getattr(c, 'max_area', None) is not None}
+    sub = {} if info is not None else None
     areas, errors, chi2, ndf, A = _linear_step_free(
-        counts, background, components, pars, channels, n_iter, nonneg)
+        counts, background, components, pars, channels, n_iter, nonneg,
+        A=A, info=sub)
     over = {i: lim for i, lim in caps.items() if areas[i] > lim}
+    if info is not None:
+        info.update(over=over, keep=list(range(len(components))), free=sub)
     if not over:
         return areas, errors, chi2, ndf, A
 
@@ -730,9 +875,12 @@ def linear_step(counts, background, components, pars, channels,
     for i, lim in over.items():
         pinned += A[:, i] * lim
     keep = [i for i in range(len(components)) if i not in over]
+    sub = {} if info is not None else None
     sub_a, sub_e, chi2, _, _ = _linear_step_free(
         counts, background + pinned, [components[i] for i in keep],
-        pars, channels, n_iter, nonneg)
+        pars, channels, n_iter, nonneg, A=A[:, keep], info=sub)
+    if info is not None:
+        info.update(keep=keep, free=sub)
 
     areas = np.zeros(len(components))
     errors = np.zeros(len(components))
@@ -746,7 +894,7 @@ def linear_step(counts, background, components, pars, channels,
 
 
 def _linear_step_free(counts, background, components, pars, channels,
-                      n_iter=3, nonneg=True):
+                      n_iter=3, nonneg=True, A=None, info=None):
     """Solve for component areas at fixed shape parameters.
 
     Iterated because the weights depend on the model, which depends on the
@@ -761,9 +909,15 @@ def _linear_step_free(counts, background, components, pars, channels,
                  models, because an unconstrained chi2 can be lowered by a
                  physically impossible negative peak, which makes two variants
                  incomparable.
+
+    A: the profile matrix, if already built. info: a dict that receives the
+    last solve's weights 'w', Gram matrix 'M', its inverse 'cov', the rows
+    'Ac' and right-hand side 'yc' (prior rows appended) and 'nd', the number
+    of data rows.
     """
     n = len(counts)
-    A = np.column_stack([c.profile(pars, n) for c in components])
+    if A is None:
+        A = np.column_stack([c.profile(pars, n) for c in components])
     Ac = A[channels, :]
     yc = counts[channels] - background[channels]
 
@@ -788,6 +942,10 @@ def _linear_step_free(counts, background, components, pars, channels,
         if g is not None and f is not None:
             groups.setdefault(g, []).append((i, float(f)))
     prior_rows, prior_rhs, prior_w = [], [], []
+    rec = None
+    if info is not None:
+        rec = info
+        rec.update(first=None, groups=[], iters=[])
     if groups:
         # a first unconstrained pass sets the scale of each group (normal
         # equations, like the main solve below, rather than BLAS lstsq)
@@ -796,10 +954,13 @@ def _linear_step_free(counts, background, components, pars, channels,
         try:
             G0 = _gram(Ac, Aw0)
             a0 = _solve_small(_inv_small(G0), G0, _matvec(Aw0.T, yc))
+            if rec is not None:
+                rec['first'] = (w0, G0, a0)
         except Exception:
             a0 = np.zeros(A.shape[1])
         for g, members in groups.items():
-            tot = max(sum(max(a0[i], 0.0) for i, _ in members), 1.0)
+            raw = sum(max(a0[i], 0.0) for i, _ in members)
+            tot = max(raw, 1.0)
             strength = PRIOR_STRENGTH.get(g, PRIOR_STRENGTH.get(None, 0.05))
             # The row's residual is (a_i - f_i * total), in counts. Give it
             # a standard deviation of strength x total, so a departure of
@@ -809,6 +970,9 @@ def _linear_step_free(counts, background, components, pars, channels,
             # is ten orders of magnitude too strong - it pinned the strong
             # runs to the prior exactly and worsened their chi2.
             lam = 1.0 / (strength * tot) ** 2
+            if rec is not None:
+                rec['groups'].append(([i for i, _ in members], raw, tot, lam,
+                                      len(prior_rows), len(members)))
             for i, f in members:
                 row = np.zeros(A.shape[1])
                 row[i] = 1.0
@@ -849,8 +1013,12 @@ def _linear_step_free(counts, background, components, pars, channels,
             areas_w = np.maximum(areas, 0.0)
         else:
             areas_w = areas
-        model = np.maximum(_matvec(Ac, areas_w)[:len(channels)]
-                           + background[channels], 1.0)
+        pre = _matvec(Ac, areas_w)[:len(channels)] + background[channels]
+        if rec is not None:
+            rec['iters'].append((w, M, cov, areas, pre))
+        model = np.maximum(pre, 1.0)
+    if info is not None:
+        info.update(Ac=Ac, yc=yc, nd=len(channels))
 
     # chi2 over the DATA rows only; the prior rows are a regulariser, not
     # a measurement, and must not be reported as goodness of fit
@@ -863,11 +1031,121 @@ def _linear_step_free(counts, background, components, pars, channels,
     return areas, errors, chi2, ndf, A
 
 
+def _dareas(fr, dAd, dyc):
+    """Derivative of _linear_step_free's areas (nonneg=True) along one
+    shape direction, given dAd, the derivative of the data rows of the
+    profile matrix, and dyc, that of the data rows' right-hand side.
+
+    Forward-mode through the solve exactly as it ran (fr is its info dict):
+    the prior scale from the first unconstrained pass, then each reweighting
+    pass, whose weights 1/model follow the previous pass's clipped model.
+    Holding the weights fixed instead left J 1-3 % off per column against
+    central differences (the synthetic O/Na/Si/Fe + sum-peak problem of
+    tests/test_analytic_jacobian.py, measured with a fixed-weights version of
+    this function, 2026-10-22), and an approximate J moves the point
+    least_squares converges to."""
+    nd = fr['nd']
+    Ac, yc = fr['Ac'], fr['yc']
+    Ad = Ac[:nd]
+    npr = Ac.shape[0] - nd
+    dlam = np.zeros(npr)
+    if fr['first'] is not None:
+        w0, G0, a0 = fr['first']
+        rhs = (_matvec(dAd.T, w0 * (yc[:nd] - _matvec(Ad, a0)))
+               + _matvec(Ad.T, w0 * (dyc - _matvec(dAd, a0))))
+        da0 = _solve_small(_inv_small(G0), G0, rhs)
+        for idx, raw, tot, lam, r0, nr in fr['groups']:
+            if raw > 1.0:
+                dtot = sum(da0[i] for i in idx if a0[i] > 0.0)
+                dlam[r0:r0 + nr] = -2.0 * lam * dtot / tot
+    dm = np.zeros(nd)
+    da = None
+    for w, M, cov, a, pre in fr['iters']:
+        dw = -w[:nd] ** 2 * dm            # w = 1/model, model = max(pre, 1)
+        dW = np.concatenate([dw, dlam]) if npr else dw
+        rhs = (_matvec(dAd.T, w[:nd] * (yc[:nd] - _matvec(Ad, a)))
+               + _matvec(Ad.T, w[:nd] * (dyc - _matvec(dAd, a)))
+               + _matvec(Ac.T, dW * (yc - _matvec(Ac, a))))
+        da = _solve_small(cov, M, rhs)
+        live = a > 0.0
+        aw = np.where(live, a, 0.0)
+        # the model's background moves too where it holds a pinned
+        # component (d background = -dyc)
+        dm = (_matvec(dAd, aw) + _matvec(Ad, np.where(live, da, 0.0))
+              - dyc) * (pre > 1.0)
+    return da
+
+
+def residual_jacobian(counts, background, components, pars, channels, idxs,
+                      solved=None):
+    """The shape fit's residual and its Jacobian in pars.a[idxs].
+
+    r is fit_spectrum's residual: areas by linear_step (nonneg=True),
+    negatives clipped, m = A a+ + background, r = (y - m) / sqrt(max(m, 1)).
+
+    J is the variable-projection Jacobian (Golub and Pereyra 1973): the
+    areas are a function of the shape, so
+        dm/dx = dA a+ + A (da/dx) [a > 0],
+    with da/dx differentiated through the solve as it ran, reweighting passes
+    and prior scale included (_dareas), and dr/dm = -(y + m) / (2 m^1.5). A component
+    pinned at its cap is a fixed area: its dA times the cap enters dm and the
+    re-solve of the rest. The profile derivatives come from each component's
+    profile_jac, built in the same pass as the profile, so a Jacobian costs
+    about one linear step instead of one per parameter. Products use the
+    BLAS-free helpers, so J is the same at every thread count.
+
+    solved: (areas, info) from linear_step(..., info=info) at these same
+    pars, when the caller has just solved them (least_squares asks for J at
+    the point whose residual it just took); the profiles are the same arrays,
+    so the solve is too, and it is not repeated.
+    """
+    n = len(counts)
+    cols, ders = [], []
+    for c in components:
+        if hasattr(c, 'profile_jac'):
+            f, d = c.profile_jac(pars, n, idxs)
+        else:
+            f = c.profile(pars, n)
+            d = _fd_profile_jac(lambda q, c=c: c.profile(q, n), pars, idxs, f)
+        cols.append(f)
+        ders.append(d)
+    A = np.column_stack(cols)
+    if solved is None:
+        info = {}
+        ar, _, _, _, A = linear_step(counts, background, components, pars,
+                                     channels, nonneg=True, A=A, info=info)
+    else:
+        ar, info = solved
+    y = counts[channels]
+    m = _matvec(A[channels], np.maximum(ar, 0.0)) + background[channels]
+    r = (y - m) / np.sqrt(np.maximum(m, 1.0))
+    mf = np.maximum(m, 1.0)
+    s = np.where(m > 1.0, -(y + m) / (2.0 * mf * np.sqrt(mf)), -1.0)
+
+    keep, over, fr = info['keep'], info['over'], info['free']
+    Ad = fr['Ac'][:fr['nd']]
+    a_k = ar[keep]
+    a_kp = np.maximum(a_k, 0.0)
+    J = np.empty((len(channels), len(idxs)))
+    for j, i in enumerate(idxs):
+        dA = np.column_stack([d[i] for d in ders])[channels]
+        dAk = dA[:, keep]
+        dp = np.zeros(len(channels))
+        for o, lim in over.items():
+            dp = dp + dA[:, o] * lim           # a pinned area is fixed
+        da = _dareas(fr, dAk, -dp)             # it moves the re-solve's data
+        dm = (_matvec(dAk, a_kp) + _matvec(Ad, np.where(a_k > 0.0, da, 0.0))
+              + dp)
+        J[:, j] = s * dm
+    return r, J
+
+
 def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
                  noise, fano, tail_amp=0.0, tail_len=0.0,
                  background=None, refine=('cal', 'width'), max_iter=12,
                  verbose=False, nonneg=True, fit_background=True,
-                 start_pars=None, refine_from_start=False, should_stop=None):
+                 start_pars=None, refine_from_start=False, should_stop=None,
+                 jacobian='analytic'):
     """Fit a PIXE spectrum.
 
     counts            spectrum
@@ -886,6 +1164,9 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
     should_stop       optional callable() -> bool, polled at every residual
                       evaluation; True raises FitCancelled. It only reads a
                       flag, so the numbers are the same with or without it.
+    jacobian          'analytic' (residual_jacobian, one pass per iteration)
+                      or '2-point' (scipy's differences, one linear step per
+                      refined parameter; the method before 0.28)
     """
     from .background import snip
 
@@ -998,8 +1279,12 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
     # file's widths and 43.3 from a different seed, which is the signature.
     #
     # GeoPIXE's pixe.pro fits the same parameters by Marquardt with analytic
-    # derivatives. scipy's trust-region LM with a numerical Jacobian is the
-    # same idea and, for a handful of parameters, costs nothing.
+    # derivatives. scipy's trust-region LM is the same idea; its Jacobian is
+    # analytic too by default (residual_jacobian), one model-plus-derivative
+    # pass per iteration instead of one linear step per parameter.
+    if jacobian not in ('analytic', '2-point'):
+        raise ValueError("jacobian must be 'analytic' or '2-point', not %r"
+                         % (jacobian,))
     idxs = [i for i, _ in active]
     if idxs:
         from scipy.optimize import least_squares
@@ -1023,14 +1308,28 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
         # scale each parameter so a unit step is a sensible move in it
         scale = np.array([max(abs(st), 1e-6) for _, st in active])
 
-        def resid(x):
-            if should_stop is not None and should_stop():
-                raise FitCancelled()
+        def trial_of(x):
             trial = ShapePars(pars.a[0], pars.a[1], pars.a[2], pars.a[3],
                               pars.a[5], pars.a[6], e_low, e_high)
             trial.a = pars.a.copy()
             for i, v in zip(idxs, x):
                 trial.a[i] = v
+            return trial
+
+        last = {}         # the solve of the latest resid(x), for jac(x)
+
+        def jac(x):
+            if should_stop is not None and should_stop():
+                raise FitCancelled()
+            got = last.get('solved') if last.get('x') == x.tobytes() else None
+            return residual_jacobian(counts, background, components,
+                                     trial_of(x), channels, idxs,
+                                     solved=got)[1]
+
+        def resid(x):
+            if should_stop is not None and should_stop():
+                raise FitCancelled()
+            trial = trial_of(x)
             # Constrained solve, despite NNLS costing more per evaluation.
             # An earlier note here claimed the opposite - that the strong
             # peaks set the shape and NNLS never clips, so nonneg=False
@@ -1039,16 +1338,28 @@ def fit_spectrum(counts, cal_a, cal_b, components, e_low, e_high,
             # chi2 of 2.96. Unclipped negative areas let the optimiser
             # wander through shapes that no non-negative model can reach,
             # and it takes more iterations to come back than NNLS costs.
+            info = {}
             ar, _, _, _, A = linear_step(counts, background, components,
-                                         trial, channels, nonneg=True)
+                                         trial, channels, nonneg=True,
+                                         info=info)
+            last.update(x=np.asarray(x, dtype=float).tobytes(),
+                        solved=(ar, info))
             m = _matvec(A[channels], np.maximum(ar, 0.0)) + background[channels]
             return (counts[channels] - m) / np.sqrt(np.maximum(m, 1.0))
 
         try:
             with _one_blas_thread():
                 sol = least_squares(resid, x0, bounds=(lower, upper),
+                                    jac=jac if jacobian == 'analytic' else '2-point',
                                     x_scale=scale, method='trf',
-                                    max_nfev=12 * max(len(idxs), 1),
+                                    # 12 per parameter left 404001's measured-
+                                    # response fit at the cap, unconverged
+                                    # (status 0; scratch passes.py,
+                                    # 2026-10-22). nfev does not count the
+                                    # 2-point Jacobian's calls, so the two
+                                    # paths' budgets differ, not only J.
+                                    max_nfev=(36 if jacobian == 'analytic' else 12)
+                                    * max(len(idxs), 1),
                                     ftol=1e-5, xtol=1e-5)
             # Score the proposal with the SAME chi2 as the start. The LM
             # objective (unconstrained solve, negatives clipped) is a proxy;
