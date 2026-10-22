@@ -6,6 +6,48 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.27.0)
 
+### Physics that changes fitted numbers
+- The shape fit uses an analytic Jacobian, not finite differences (BUGS.md "The shape-parameter
+  Jacobian is by finite differences"). Each line's profile and its derivatives in noise, Fano,
+  cal offset and gain, tail, shelf, contact, window, sum deficit and the measured-response scales
+  are built in one pass (`peakshape.line_profile_jac`, `hypermet.line_profile_jac`), as
+  GeoPIXE's `line.pro` does. The areas are differentiated exactly through the reweighting passes,
+  the M-subshell prior scale and the pile-up cap (`fit.residual_jacobian`). It agrees with
+  central differences to 1e-7 (tests/test_analytic_jacobian.py). The plateau keeps a forward
+  difference of its own profile. `least_squares` may take 36 evaluations per refined parameter,
+  not 12: with 12, 404001's measured-response fit stopped at the cap, unconverged (status 0), at
+  a path-dependent point. The old method is still `fit_spectrum(..., jacobian='2-point')`.
+  Fitted numbers move because the optimiser takes a different path. Pinned -> new (golden
+  recipes, 2026-10-22; scratch `golden_table.py`):
+  - 287424 is bit-identical to master; both proposals are rejected there, see BUGS.md "287424's
+    shape refinement is always rejected".
+  - Quartz: chi2r 1.99083 -> 1.990770, noise 36.2896 -> 36.2878, Fano 27.4343 -> 27.4377.
+  - 404001 converges where master stopped at the cap: chi2r 1.67484 -> 1.674981 (master today
+    1.674995), noise 38.6244 -> 38.6221.
+  - 404003: chi2r 1.35018 -> 1.348497, Fano 25.0451 -> 25.0018 (-0.17 %), AlKb +0.67 sigma.
+  - 404004: chi2r 1.9944 -> 1.994307 (master today 1.992878), Fano 21.9466 -> 21.9043 (-0.19 %).
+  - The 404003 and 404004 widths are the flat-valley scatter of BUGS.md "404003 and 404004 widths
+    scatter".
+  - Re-pinned in tests/test_golden_spectra.py with Charles's approval, no tolerance changed (golden
+    run 2026-10-22 ~11:35, scratch `golden_table.py`). 404003: chi2r 1.35018 -> 1.3485; pars
+    (38.1036, 25.0451, 1201.62, 510.053) -> (38.086, 25.0018, 1201.59, 510.053); areas AlKb
+    1363270 -> 1394284, Al 555028.3 -> 554658.4, GaL 125181.3 -> 125163.5, O 65828.28 -> 65816.52,
+    AuM5 39112.67 -> 39073.85, AuM4 22203.59 -> 22232.04, Ti 7153.517 -> 7152.496, AuM3 3764.421 ->
+    3759.397, AuMz 2307.723 -> 2283.414, N 1537.792 -> 1535.158, AuM2 999.222 -> 998.5574, Si
+    720.6023 -> 722.9908. 404004: chi2r 1.9944 -> 1.99431; pars (40.9898, 21.9466, 1200.22,
+    506.165) -> (40.9876, 21.9043, 1200.22, 506.165); areas SiKb 3414312 -> 3414313, pileup
+    4510.373 -> 4510.432, C 2002.547 -> 2002.534, pileup plateau 1501.021 -> 1500.941 (Si
+    unchanged). Fit sigmas moved in the fourth digit or not at all. 287424, quartz and 404001
+    pass as pinned.
+  Fits stay bit-identical at OMP_NUM_THREADS 1, 4 and 16.
+- Faster. tools/bench_recipes.py, master and branch interleaved, 2026-10-22 11:23-11:32, best of 3:
+  287424 53.5 -> 12.7 s, quartz 4.45 -> 2.44, 404001 12.5 -> 10.9, 404003 15.6 -> 10.0,
+  404004 2.07 -> 1.84.
+
+### Tools
+- `tools/profile_fit.py` (where a fit's time goes) and `tools/bench_recipes.py` (golden recipes
+  timed in interleaved repeats, with an md5 of the results, and `--other` for a second checkout).
+
 ## 0.27.0 - 2026-10-21: fits independent of BLAS threads; Maps tab with GeoPIXE image tools
 
 ### Physics that changes fitted numbers

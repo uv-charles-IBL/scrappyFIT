@@ -176,6 +176,149 @@ def line_profile(E, beta, pars, n_channels, resp, with_artefact=True):
     return f
 
 
+# Parameters line_profile depends on: noise, Fano, cal offset and gain, and
+# the response scales a5 and a6. Everything else has zero derivative.
+JAC_PARAMS = frozenset((0, 1, 2, 3, 5, 6))
+_DERFC = -2.0 / np.sqrt(np.pi)          # d erfc(t) / dt = _DERFC * exp(-t^2)
+
+
+def _tail_jac(x, c, s, b):
+    """tail(x, c, s, b) and its derivatives with respect to c, s and b."""
+    T = tail(x, c, s, b)
+    bb = max(b, 1e-6)
+    db = 1.0 if b > 1e-6 else 0.0
+    z = (x - c) / bb + s * s / (2.0 * bb * bb)
+    live = (z > -700.0) & (z < 700.0)
+    t = (x - c) / (SQRT2 * s) + s / (SQRT2 * bb)
+    # e^z erfc'(t) / (2b), with the exponents combined so neither overflows
+    g = _DERFC * np.exp(np.minimum(np.clip(z, -700.0, 700.0) - t * t, 700.0)) / (2.0 * bb)
+    # The clip and the b floor are kept consistent with tail() but are not
+    # reached in practice: b >= ~0.5 channel and the window reaches 12 b below
+    # c, so |z| stays far from 700.
+    zc = np.where(live, -1.0 / bb, 0.0)
+    zs = np.where(live, s / (bb * bb), 0.0)
+    zb = np.where(live, -(x - c) / (bb * bb) - s * s / bb ** 3, 0.0)
+    T_c = T * zc + g * (-1.0 / (SQRT2 * s))
+    T_s = T * zs + g * (-(x - c) / (SQRT2 * s * s) + 1.0 / (SQRT2 * bb))
+    T_b = (T * zb - T / bb + g * (-s / (SQRT2 * bb * bb))) * db
+    return T, T_c, T_s, T_b
+
+
+def _shelf_jac(x, c, s, c0, slope=0.0):
+    """shelf(x, c, s, c0, slope) and its derivatives with respect to c, s,
+    c0 and slope (the x >= c0 cut is a fixed mask)."""
+    S = shelf(x, c, s, c0, slope)
+    on = x >= c0
+    if slope and slope > 0:
+        T, T_c, T_s, T_b = _tail_jac(x, c, s, slope)
+        f = np.where(on, T, 0.0)
+        t = f.sum()
+        if not t > 0:
+            z = np.zeros_like(x)
+            return S, z, z, z, z
+        parts = []
+        for g in (T_c, T_s, T_b):
+            g = np.where(on, g, 0.0)
+            parts.append((g - S * g.sum()) / t)
+        return S, parts[0], parts[1], np.zeros_like(x), parts[2]
+    D = max(c - c0, 1.0)
+    dD = 1.0 if c - c0 > 1.0 else 0.0
+    u = (x - c) / (SQRT2 * s)
+    g = np.where(on, _DERFC * np.exp(-u * u) / (2.0 * D), 0.0)
+    S_c = g * (-1.0 / (SQRT2 * s)) - S * dD / D
+    S_s = g * (-(x - c) / (SQRT2 * s * s))
+    S_c0 = S * dD / D
+    return S, S_c, S_s, S_c0, np.zeros_like(x)
+
+
+def line_profile_jac(E, beta, pars, n_channels, resp, idxs, with_artefact=True):
+    """line_profile and its derivatives with respect to pars.a[i], i in idxs.
+
+    Returns (f, d): f is line_profile's array exactly (the same calls in the
+    same order); d maps each i to df/da_i (zeros for an index line_profile
+    does not use). The window and the x >= c0 cut are held fixed, as a step
+    too small to move them sees.
+    """
+    a = pars.a
+    f = np.zeros(n_channels)
+    d = {i: np.zeros(n_channels) for i in idxs}
+    want = [i for i in idxs if i in JAC_PARAMS]
+    if beta == 0:
+        return f, d
+    c = float(pars.centroid(E))
+    if c < 0 or c > n_channels - 1:
+        return f, d
+    w = float(pars.fwhm_channels(E))
+    s = w / np.sqrt(KW)
+    ft, b_keV, fs, sl_keV = resp.params(E)
+    k5, k6 = float(a[5]), float(a[6])
+    # a5 or a6 exactly 0 means "unscaled", a jump, not a slope: its
+    # derivative is 0 there. fit_spectrum seeds both at 1.0 when refining.
+    dft = {5: 0.0, 6: 0.0}
+    dfs = {5: 0.0, 6: 0.0}
+    if k5 != 0.0 or k6 != 0.0:
+        ft0, fs0 = ft, fs
+        ft = ft * (k5 * k5 if k5 != 0.0 else 1.0)
+        fs = fs * (k6 * k6 if k6 != 0.0 else 1.0)
+        dft[5] = 2.0 * ft0 * k5 if k5 != 0.0 else 0.0
+        dfs[6] = 2.0 * fs0 * k6 if k6 != 0.0 else 0.0
+        if ft + fs > 0.95:
+            q = ft + fs
+            # (ft, fs) -> 0.95 (ft, fs) / (ft + fs)
+            jt = {k: 0.95 * (fs * dft[k] - ft * dfs[k]) / (q * q) for k in (5, 6)}
+            js = {k: 0.95 * (ft * dfs[k] - fs * dft[k]) / (q * q) for k in (5, 6)}
+            dft, dfs = jt, js
+            r = 0.95 / q
+            ft, fs = ft * r, fs * r
+    chpk = float(a[3])
+    b = b_keV * chpk
+    cz = float(pars.centroid(0.0))
+    c0 = max(cz, 0.0)
+    lo = max(int(min(c0, c - 8 * s - 12 * b)), 0)
+    hi = min(int(c + 6 * s) + 1, n_channels)
+    x = np.arange(lo, hi, dtype=float)
+    G = gauss(x, c, s)
+    G_c = G * (x - c) / (s * s)
+    G_s = G * ((x - c) ** 2 / s ** 3 - 1.0 / s)
+    T, T_c, T_s, T_b = _tail_jac(x, c, s, b)
+    S, S_c, S_s, S_c0, S_sl = _shelf_jac(x, c, s, c0, sl_keV * chpk)
+    # the profile, from the same pieces and the same expression as
+    # line_profile, so it is that array exactly
+    f[lo:hi] = beta * ((1.0 - ft - fs) * G + ft * T + fs * S)
+    g0 = 1.0 - ft - fs
+    P_c = beta * (g0 * G_c + ft * T_c + fs * S_c)
+    P_s = beta * (g0 * G_s + ft * T_s + fs * S_s)
+    wfree = (a[0] ** 2 + a[1] ** 2 * (E - pars.eow)) > 1e-12
+    ds = ({0: a[0] / w / np.sqrt(KW),
+           1: a[1] * (E - pars.eow) / w / np.sqrt(KW)} if wfree else {})
+    dc = {2: 1.0, 3: E - pars.eoc}
+    dc0 = {2: 1.0, 3: -pars.eoc} if cz > 0.0 else {}
+    for i in want:
+        g = np.zeros_like(x)
+        if i in dc:
+            g = g + P_c * dc[i]
+        if i in ds:
+            g = g + P_s * ds[i]
+        if i in dc0:
+            g = g + beta * fs * S_c0 * dc0[i]
+        if i == 3:
+            # the tail slope and the shelf slope are in keV, so channels
+            # move with the gain
+            g = g + beta * (ft * T_b * b_keV + fs * S_sl * sl_keV)
+        if i in (5, 6):
+            g = g + beta * (dft[i] * (T - G) + dfs[i] * (S - G))
+        d[i][lo:hi] += g
+    if with_artefact:
+        fa = resp.al_fraction(E)
+        if fa > 0:
+            fa_, da_ = line_profile_jac(AL_KA, beta * fa, pars, n_channels, resp,
+                                        idxs, with_artefact=False)
+            f += fa_
+            for i in idxs:
+                d[i] += da_[i]
+    return f, d
+
+
 def fit_line(E_axis, counts, lo, hi, E0, neighbours=(), subthr_width=0.5, fix_subthr_width=True,
              sloped_shelf=False):
     """Local Hypermet fit to one isolated line in keV space - the measurement a response

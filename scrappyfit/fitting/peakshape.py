@@ -365,6 +365,230 @@ def line_profile(E, beta, pars, n_channels, tail_amp=0.0, tail_len=0.0,
     return f
 
 
+# --------------------------------------------------------------- derivatives
+#
+# The shape parameters' Jacobian, built in the same pass as the profile, as
+# GeoPIXE's line.pro does (line.pro:144-241 adds df[channel, param] beside the
+# model). Before this, least_squares differenced the whole model, one full
+# linear step per refined parameter at every iteration (BUGS.md, 2026-10-22).
+#
+# noise, Fano, cal offset and gain act on a line only through its centroid c
+# and width w, so each piece is differentiated with respect to c and w and the
+# chain rule gives the parameters: dc/da2 = 1, dc/da3 = E - eoc,
+# dw/da0 = a0/w, dw/da1 = a1 (E - eow)/w. The integer windows are held fixed:
+# the derivative is that of the profile on its current support, which is what
+# a step small enough not to move a window edge sees.
+
+JAC_PARAMS = frozenset((P_NOISE, P_FANO, P_CALB, P_CALA, P_TAILAMP, P_TAILLEN,
+                        P_SHELF0, P_SHELFE, P_CONTACT, P_WINDOW))
+_DERFC = -2.0 / np.sqrt(np.pi)          # d erfc(t) / dt = _DERFC * exp(-t^2)
+
+
+def _de_shelf_jac(x, c_p, s, c_c, S1, S2, dS1, dS2):
+    """de_shelf(x, c_p, s, c_c, s, S1, S2) and its derivatives with respect
+    to c_p, s, c_c and, through S1 and S2, the line energy (dS1 = dS1/dE,
+    dS2 = dS2/dE). Returns (d, d_cp, d_s, d_cc, d_E)."""
+    d = de_shelf(x, c_p, s, c_c, s, S1, S2)
+    dx = x - c_p
+    u = dx / s
+    sc = max(s, 1e-6)
+    v = (x - c_c) / sc
+    out = [np.zeros_like(x) for _ in range(4)]
+
+    def part(S, dSdE, sign):
+        if S < 1e-3:
+            S, dSdE = 1e-3, 0.0
+        S = float(S)
+        z = dx / (s * S) + 1.0 / (2.0 * S * S)
+        clip = (z < -700.0) | (z > 700.0)
+        z = np.minimum(np.maximum(z, -700.0), 700.0)
+        ta = _RSQRT2 * (u + 1.0 / S)
+        tb = _RSQRT2 * (v + 1.0 / S)
+        ez = np.exp(z)
+        ep = ez * (erfc(ta) - erfc(tb))
+        ga = _DERFC * np.exp(np.minimum(z - ta * ta, 700.0))   # e^z erfc'(ta)
+        gb = _DERFC * np.exp(np.minimum(z - tb * tb, 700.0))
+        dz_c = np.where(clip, 0.0, -1.0 / (s * S))
+        dz_s = np.where(clip, 0.0, -dx / (s * s * S))
+        dz_S = np.where(clip, 0.0, -dx / (s * S * S) - 1.0 / S ** 3)
+        e_c = ep * dz_c + ga * (-_RSQRT2 / s)
+        e_s = ep * dz_s + ga * (-_RSQRT2 * u / s)
+        if s > 1e-6:
+            e_s = e_s - gb * (-_RSQRT2 * v / s)
+        e_cc = -gb * (-_RSQRT2 / sc)
+        e_S = ep * dz_S + (ga - gb) * (-_RSQRT2 / (S * S))
+        for o, val in zip(out, (e_c, e_s, e_cc, e_S * dSdE)):
+            o += sign * 0.5 * val
+    part(S1, dS1, 1.0)
+    part(S2, dS2, -1.0)
+    return (d,) + tuple(out)
+
+
+def _de_slopes_jac(pars, E):
+    """de_slopes and dS1/dE, dS2/dE (zero where a floor holds)."""
+    s1 = pars.a[P_DES1] if pars.a[P_DES1] > 1e-6 else DE_S1
+    s2 = pars.a[P_DES2] if pars.a[P_DES2] > 1e-6 else DE_S2
+    s1 = s1 + pars.a[P_DES1E] * E
+    d1 = float(pars.a[P_DES1E]) if s1 > 0.05 else 0.0
+    return max(s1, 0.05), max(s2, 0.05), d1, 0.0
+
+
+def line_profile_jac(E, beta, pars, n_channels, idxs, tail_amp=0.0,
+                     tail_len=0.0, beta_tail=1.0, do_tail=True, energy=False):
+    """line_profile and its derivatives with respect to pars.a[i], i in idxs.
+
+    Returns (f, d): f is line_profile's array exactly (the same expressions
+    in the same order); d maps each i in idxs to df/da_i, zeros where f does
+    not depend on it. Indices outside JAC_PARAMS raise ValueError: the caller
+    differences those. With energy=True, d['E'] is df/dE at fixed tail
+    amplitude and length (the sum peaks' deficit moves their energy).
+    """
+    bad = set(idxs) - JAC_PARAMS
+    if bad:
+        raise ValueError('no analytic derivative for a[%s]' % sorted(bad))
+    keys = list(idxs) + (['E'] if energy else [])
+    f = np.zeros(n_channels, dtype=float)
+    d = {k: np.zeros(n_channels, dtype=float) for k in keys}
+
+    a = pars.a
+    w = float(pars.fwhm_channels(E))
+    w2 = w * w
+    c = float(pars.centroid(E))
+    if c < 0 or c > n_channels - 1:
+        return f, d
+    # chain-rule factors: how c and w move with each key
+    wfree = (a[P_NOISE] ** 2 + a[P_FANO] ** 2 * (E - pars.eow)) > 1e-12
+    dc = {P_CALB: 1.0, P_CALA: E - pars.eoc, 'E': float(a[P_CALA])}
+    dw = ({P_NOISE: a[P_NOISE] / w, P_FANO: a[P_FANO] * (E - pars.eow) / w,
+           'E': a[P_FANO] ** 2 / (2.0 * w)} if wfree else {})
+
+    def add(sl, piece_c, piece_w, direct=None):
+        """d[k][sl] += piece_c*dc/dk + piece_w*dw/dk + direct[k]."""
+        for k in keys:
+            g = None
+            if piece_c is not None and k in dc:
+                g = piece_c * dc[k]
+            if piece_w is not None and k in dw:
+                g = piece_w * dw[k] if g is None else g + piece_w * dw[k]
+            if direct and k in direct:
+                g = direct[k] if g is None else g + direct[k]
+            if g is not None:
+                d[k][sl] += g
+
+    use_tail = do_tail and tail_amp > 0.0
+    if use_tail:
+        m1 = min(max(int(25.0 * w), 50), 1000)
+        m2 = min(max(int(4.0 * w), 5), 1000)
+    else:
+        m1 = m2 = min(max(int(4.0 * w), 5), 1000)
+
+    # --- Gaussian core ---
+    lo = max(int(np.floor(c - m2)), 0)
+    hi = min(int(np.ceil(c + m2)), n_channels - 1)
+    if hi <= lo:
+        return f, d
+    x = np.arange(lo, hi + 1, dtype=float)
+    kxc2 = KW * (x - c) ** 2 / w2
+    g_core = np.exp(-kxc2 / 2.0)
+    G = KF * KW05 * beta / w * g_core
+    f[lo:hi + 1] += G
+    add(slice(lo, hi + 1), G * (KW * (x - c) / w2), G * ((kxc2 - 1.0) / w))
+
+    if use_tail:
+        lo_t = max(int(np.floor(c - m1)), 0)
+        hi_t = int(np.floor(c))
+        if hi_t > lo_t:
+            xt = np.arange(lo_t, hi_t, dtype=float)
+            kxc2t = KW * (xt - c) ** 2 / w2
+            gt = np.exp(-kxc2t / 2.0)
+            q5 = ALPHA_ZERO + a[P_TAILAMP] ** 2
+            alpha = tail_amp * q5
+            q6 = GAMMA_ZERO + a[P_TAILLEN] ** 2
+            gamma = tail_len * q6
+            if gamma > 0:
+                xcw = (xt - c) / (gamma * w)
+                ex = np.exp(xcw)
+                aket = alpha * beta_tail * beta * ex / w
+                T = aket * (1.0 - gt)
+                f[lo_t:hi_t] += T
+                e1 = beta_tail * beta * ex / w * (1.0 - gt)     # T / alpha
+                direct = {P_TAILAMP: tail_amp * 2.0 * a[P_TAILAMP] * e1,
+                          P_TAILLEN: T * (-xcw / gamma) * tail_len * 2.0 * a[P_TAILLEN]}
+                dxt = xt - c
+                t_c = -aket * ((1.0 - gt) / (gamma * w) + gt * KW * dxt / w2)
+                t_w = (aket * (1.0 - gt) * (-xcw / w - 1.0 / w)
+                       - aket * gt * kxc2t / w)
+                add(slice(lo_t, hi_t), t_c, t_w, direct)
+
+    # --- electron-escape shelves: escape, contact, window ---
+    sig = w / np.sqrt(KW)
+    es = a[P_SHELFE] if a[P_SHELFE] > 1e-6 else SHELF_REF
+    des = 1.0 if a[P_SHELFE] > 1e-6 else 0.0          # d es / d a9
+    # A term whose amplitude is exactly 0 is off, and the profile has a kink
+    # there; it still gets the one-sided derivative (amplitude -> 0+), which
+    # is what lets the optimiser move it off its lower bound, as scipy's
+    # 2-point difference does by stepping inward.
+    terms = []
+    s0 = a[P_SHELF0]
+    if s0 > 0.0 or (s0 == 0.0 and P_SHELF0 in keys):
+        fs = s0 * np.exp(-E / es)
+        sl_drop = 1.0 if SI_LVV >= (1.0 - STEP_FRAC) * E else STEP_FRAC
+        drop = max(SI_LVV, (1.0 - STEP_FRAC) * E)
+        # d(E - drop)/dE: 1 while the fixed Si LVV offset holds, else 0.92
+        terms.append((fs, P_SHELF0, s0, E - drop,
+                      1.0 if sl_drop == 1.0 else STEP_FRAC))
+    ct = a[P_CONTACT]
+    if ct > 0.0 or (ct == 0.0 and P_CONTACT in keys):
+        fc = ct * np.exp(-E / es)
+        e_cut = max(E - AL_L_EDGE, 1e-4)
+        terms.append((fc, P_CONTACT, ct, e_cut, 1.0 if e_cut > 1e-4 else 0.0))
+    wn = a[P_WINDOW]
+    if (wn > 0.0 or (wn == 0.0 and P_WINDOW in keys)) and E > N_K_EDGE:
+        fw = wn * np.exp(-E / es)
+        e_cut = max(E - N_K_EDGE, 1e-4)
+        terms.append((fw, P_WINDOW, wn, e_cut, 1.0 if e_cut > 1e-4 else 0.0))
+    if terms:
+        S1, S2, dS1, dS2 = _de_slopes_jac(pars, E)
+    for amp, p_amp, p_val, e_cut, decut in terms:
+        c_lo = float(pars.centroid(e_cut))
+        lo_s = max(int(np.floor(c_lo - 4.0 * sig)), 0)
+        hi_s = min(int(np.ceil(c + 4.0 * sig)), n_channels)
+        if not hi_s > lo_s:
+            continue
+        xs = np.arange(lo_s, hi_s, dtype=float)
+        dd, d_cp, d_s, d_cc, d_E = _de_shelf_jac(xs, c, sig, c_lo, S1, S2,
+                                                 dS1, dS2)
+        tot = dd.sum()
+        if not tot > 0:
+            continue
+        if p_val == 0.0:
+            # off: only the one-sided slope in its own amplitude
+            d[p_amp][lo_s:hi_s] += np.exp(-E / es) * beta * dd / tot
+            continue
+        A = amp * beta
+        P = A * dd / tot
+        f[lo_s:hi_s] += P
+        nrm = dd / tot
+
+        def norm_d(g):          # derivative of A * dd / tot from that of dd
+            return A * (g - nrm * g.sum()) / tot
+        sl = slice(lo_s, hi_s)
+        # c moves the peak end, c_lo the cut-off; both are a2 + a3 (E' - eoc)
+        dclo = {P_CALB: 1.0, P_CALA: e_cut - pars.eoc,
+                'E': float(a[P_CALA]) * decut}
+        p_c = norm_d(d_cp)
+        p_cc = norm_d(d_cc)
+        p_w = norm_d(d_s) / np.sqrt(KW)
+        direct = {p_amp: P / p_val,
+                  P_SHELFE: P * (E / (es * es)) * des,
+                  'E': norm_d(d_E) - P / es}
+        for k in keys:
+            if k in dclo:
+                direct[k] = direct.get(k, 0.0) + p_cc * dclo[k]
+        add(sl, p_c, p_w, direct)
+    return f, d
+
+
 def element_profile(lines, pars, n_channels, tail_amp_fn=None,
                     tail_len_fn=None, do_tail=True):
     """Sum of line profiles for one element.
