@@ -861,6 +861,10 @@ class MainWindow(QtWidgets.QMainWindow):
             'concentration (wt%) through a loaded GeoPIXE .dam, overlaps '
             'and background resolved (File > Load DA matrix)')
         self.cmb_kind.currentTextChanged.connect(self.on_map_kind)
+        self.btn_map_pick = QtWidgets.QToolButton()
+        self.btn_map_pick.setText('table...')
+        self.btn_map_pick.setToolTip('Pick the line from a periodic table')
+        self.btn_map_pick.clicked.connect(self.on_map_pick)
         self.cmb_bg = QtWidgets.QComboBox()
         for lab, key in MAP_BACKGROUNDS:
             self.cmb_bg.addItem(lab, key)
@@ -901,6 +905,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 top.addWidget(self.btn_map_prev)
                 top.addWidget(x)
                 top.addWidget(self.btn_map_next)
+                top.addWidget(self.btn_map_pick)
                 continue
             top.addWidget(x)
         top.addWidget(QtWidgets.QLabel('background'))
@@ -1610,6 +1615,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if cur in lines:
             self.cmb_mapel.setCurrentText(cur)
         self.cmb_bg.setEnabled(not da)
+
+    @user_action
+    def on_map_pick(self):
+        """Choose the map line from a periodic table of the lines in the
+        list (window lines in the fit range, or the DA matrix's), and map
+        it."""
+        from .maplines import MapLinePicker
+        lines = [self.cmb_mapel.itemText(i)
+                 for i in range(self.cmb_mapel.count())]
+        if not lines:
+            self.say('No map lines yet - open a list-mode file and set the '
+                     'range first.')
+            return
+        d = MapLinePicker(self.session.db, lines,
+                          self.cmb_mapel.currentText(), self)
+        picked = []
+        d.linePicked.connect(picked.append)
+        d.exec_()
+        if picked:
+            self.cmb_mapel.setCurrentText(picked[-1])
+            self.on_map()
 
     @user_action
     def on_map_step(self, step):

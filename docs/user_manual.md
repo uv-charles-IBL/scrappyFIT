@@ -288,7 +288,9 @@ This is the part that matters most and the part GeoPIXE makes hardest.
 
 Go to the **Maps** tab, choose a line, **Show map**. The list holds the lines
 inside the fit range: `Si` is the K line, `Ag L` and `Pb M` the L-alpha and
-M-alpha lines; typing `AgL`, `Ag:L`, `ag l` or an energy in keV works too. A line whose
+M-alpha lines; typing `AgL`, `Ag:L`, `ag l` or an energy in keV works too.
+**table...** shows the same lines as a periodic table: click an element to map
+it, and where it has more than one shell on the spectrum, choose K, L or M. A line whose
 peak window is off the spectrum is refused, and so is **Mask above percentile** on a
 flat map (every pixel would be "above" it). The background flanks, each one
 peak-width wide and one width from the peak, are taken only from channels that

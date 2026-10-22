@@ -48,8 +48,13 @@ reproducible against a stated version.
   the tab to DA maps of the matrix's elements; before, DA maps reached only Concentration profiles.
 - Window background choices as GeoPIXE's cut types (`analyze_cut.pro`; geopixe-ref 2026-10-21):
   linear between two flanks (default, as before), flat from the low or the high flank, or none. The
-  "subtract background" checkbox is gone. `Session.element_map(background=...)`, `Session.da_map`,
+  "subtract background" checkbox is gone: its default (ticked) is the combo's default, linear, and
+  unticked is "none". `Session.element_map(background=...)`, `Session.da_map`,
   `Session.da_map_names`. No map number changes for the default (linear) or for "none".
+- **table...** beside the line list opens a periodic table of the map lines (window lines in the fit
+  range, or the DA matrix's elements) in the element dialog's layout; each cell shows the shells it
+  can map, one click maps a single shell and a cell with several asks which (`Fe` / `Fe L`). GeoPIXE
+  picks from a droplist only (`gimage.pro:1636-1647`). `gui/maplines.py`.
 
 ## 0.26.0 - 2026-10-21: spectrum display, Sabbatucci-Salvat fetched on first use
 
