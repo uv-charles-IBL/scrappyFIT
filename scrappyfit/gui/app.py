@@ -38,7 +38,8 @@ from ..io import sabbatucci
 from ..io.live import LiveLMF, refresh_session
 from ..physics import artefacts, lineid
 from ..session import FitOptions, Session
-from .canvases import (LEGEND_MODES, MAP_CMAPS, MAP_PCT, MAP_SCALES,
+from .canvases import (LEGEND_MODES, MAP_BACKGROUNDS, MAP_CMAPS, MAP_KINDS,
+                       MAP_PCT, MAP_SCALES, describe_map, map_kind_short,
                        MapCanvas, SpectrumCanvas, toolbar_for)
 from .dialogs import ElementDialog, SampleModelDialog
 from .layerview import LayerStackDialog
@@ -108,6 +109,8 @@ def export_map_csv(path, data, session, meta):
             'cal %.10g keV/ch, %.10g keV; row 0 = bottom (y = 0)'
             % (meta['label'], meta['element'], meta['kind'], meta['binning'],
                data.shape[1], data.shape[0], a, b))
+    if meta.get('description'):
+        head += '\n' + meta['description']
     np.savetxt(path, data, delimiter=',', fmt='%.8g', header=head)
     out = [path]
     m = session.mask
@@ -847,8 +850,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_bin = QtWidgets.QSpinBox()
         self.spin_bin.setRange(1, 32)
         self.spin_bin.setValue(4)
-        self.chk_sub = QtWidgets.QCheckBox('subtract background')
-        self.chk_sub.setChecked(True)
+        # What a map is, chosen and then stated on it: a WINDOW map counts
+        # events in an energy window (GeoPIXE's "cut" images, with its three
+        # background types, analyze_cut.pro), a DA map projects every event
+        # through a loaded GeoPIXE DA matrix (wt%, overlaps resolved).
+        self.cmb_kind = QtWidgets.QComboBox()
+        self.cmb_kind.addItems(MAP_KINDS)
+        self.cmb_kind.setToolTip(
+            'window: counts in an energy window round the line.  DA matrix: '
+            'concentration (wt%) through a loaded GeoPIXE .dam, overlaps '
+            'and background resolved (File > Load DA matrix)')
+        self.cmb_kind.currentTextChanged.connect(self.on_map_kind)
+        self.cmb_bg = QtWidgets.QComboBox()
+        for lab, key in MAP_BACKGROUNDS:
+            self.cmb_bg.addItem(lab, key)
+        self.cmb_bg.setToolTip(
+            "Window background, as GeoPIXE's cut types. linear: two flanks "
+            'one window-width either side, interpolated under the peak.  '
+            'low / high flank: one flank, flat.  none: raw counts.')
         self.spin_thr = QtWidgets.QSpinBox()
         self.spin_thr.setRange(50, 99)
         self.spin_thr.setValue(90)
@@ -878,12 +897,14 @@ class MainWindow(QtWidgets.QMainWindow):
                        (self.spin_thr, 'percentile')):
             top.addWidget(QtWidgets.QLabel(lab))
             if x is self.cmb_mapel:
+                top.addWidget(self.cmb_kind)
                 top.addWidget(self.btn_map_prev)
                 top.addWidget(x)
                 top.addWidget(self.btn_map_next)
                 continue
             top.addWidget(x)
-        top.addWidget(self.chk_sub)
+        top.addWidget(QtWidgets.QLabel('background'))
+        top.addWidget(self.cmb_bg)
         top.addWidget(b_map)
         top.addWidget(b_thr)
         top.addStretch(1)
@@ -940,6 +961,11 @@ class MainWindow(QtWidgets.QMainWindow):
         mv.addLayout(top)
         mv.addLayout(row2)
         mv.addLayout(row3)
+        # what the shown map is, in words: kind, units, window, background
+        self.lbl_mapkind = QtWidgets.QLabel('No map shown.')
+        self.lbl_mapkind.setWordWrap(True)
+        self.lbl_mapkind.setStyleSheet('color:#333;')
+        mv.addWidget(self.lbl_mapkind)
         mv.addWidget(self.map_toolbar)
         mv.addWidget(self.map, 1)
         self.map.mpl_connect('button_press_event', self.on_map_click)
@@ -1083,6 +1109,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # fit_setup.pro:95-100)
         self.last_shape = None
         self._sync_hold()
+        # a new file drops any DA matrix (Session.reset_data) unless it IS
+        # one: the Maps row follows at once, not at the next Show map
+        self._sync_map_kind(prefer_da=self.session.dam is not None)
         s = self.session
         self.lbl_file.setText('%s\n%s' % (os.path.basename(path), s.label))
         self.ed_gain.setText('%.7f' % s.cal[0])
@@ -1154,6 +1183,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.session.set_yield_set(*ys)
             self.last_shape = None          # another detector's lines
             self._sync_hold()
+            self._sync_map_kind()
             if y[0]:
                 self.session.set_yield(*y)
             self.yieldChanged.emit()
@@ -1504,38 +1534,82 @@ class MainWindow(QtWidgets.QMainWindow):
         if s.events is None:
             self.say('Maps need a list-mode (.lmf) file.')
             return False
+        self._sync_map_kind()
         el = self.cmb_mapel.currentText().strip()
+        b = self.spin_bin.value()
+        da = self.cmb_kind.currentText() == MAP_KINDS[1]
         try:
-            m = s.element_map(el, binning=self.spin_bin.value(),
-                              subtract=self.chk_sub.isChecked())
+            if da:
+                m = s.da_map(el, binning=b)
+            else:
+                m = s.element_map(el, binning=b,
+                                  background=self.cmb_bg.currentData())
         except Exception as ex:
             self.say('MAP FAILED: %s' % ex)
             return False
-        self.map.show_map(m, '%s   (%dx%d bin%s)'
-                          % (el, self.spin_bin.value(), self.spin_bin.value(),
-                             ', net' if self.chk_sub.isChecked() else ', raw'),
-                          binning=self.spin_bin.value())
+        info = dict(s.map_info)
+        self.map.show_map(m, '%s   %s   (%dx%d bin)'
+                          % (el, map_kind_short(info), b, b),
+                          binning=b, units=info.get('units', ''))
+        self.lbl_mapkind.setText(describe_map(info))
         # what made this map, taken now: a later open or calibration edit
         # must not relabel numbers it did not produce
         self._map_meta = dict(
-            element=el, binning=self.spin_bin.value(),
-            kind='net' if self.chk_sub.isChecked() else 'raw',
+            element=el, binning=b, kind=map_kind_short(info),
+            description=describe_map(info),
             label=s.label, cal=tuple(s.cal),
             stem=re.sub(r'[^\w.-]+', '_', pathlib.Path(s.path or s.label
                                                         or 'map').stem))
         self.map.set_mask(s.mask)
         self.tabs.setCurrentIndex(1)
-        fl = s.map_info.get('flanks') or ()
-        if len(fl) == 1:
+        fl = info.get('flanks') or ()
+        if info.get('asked') == 'linear' and len(fl) == 1:
             self.say('%s: one background flank is off the populated spectrum, '
                      'so the background is flat from the %s'
-                     % (el, s.map_info['background'].split(', ')[1]))
-        if self.chk_sub.isChecked() and np.nanmedian(m) < 0:
+                     % (el, info['background'].split(', ')[1]))
+        if (not da and info.get('background') != 'none'
+                and np.nanmedian(m) < 0):
             self.say('WARNING: this net map is mostly negative. Flanking '
                      'subtraction fails where a weak line sits between strong '
                      'neighbours (Al between Mg and Si is the usual case). '
-                     'Untick "subtract background" and read it as raw counts.')
+                     'Set background to none and read it as raw counts, or '
+                     'load a DA matrix.')
         return True
+
+    def _sync_map_kind(self, prefer_da=False):
+        """DA maps only with a DA matrix loaded; fall back to window maps
+        (and their line list) when it goes, e.g. on opening another file.
+        prefer_da switches to DA maps when there is a matrix. The line list
+        is refilled either way: a second matrix has its own elements."""
+        has = self.session.dam is not None
+        item = self.cmb_kind.model().item(1)
+        if item is not None:
+            item.setEnabled(has)
+        want = 1 if has and (prefer_da or self.cmb_kind.currentIndex() == 1) \
+            else 0
+        if self.cmb_kind.currentIndex() != want:
+            self.cmb_kind.setCurrentIndex(want)   # refills the list
+        elif want == 1:
+            self.on_map_kind(self.cmb_kind.currentText())
+
+    @user_action
+    def on_map_kind(self, kind):
+        """Window and DA maps have their own line lists: the window lines in
+        the fit range, or the matrix's elements."""
+        s = self.session
+        da = kind == MAP_KINDS[1]
+        if da and s.dam is None:
+            self.say('Load a DA matrix first (File > Load DA matrix).')
+            self.cmb_kind.setCurrentIndex(0)
+            return
+        cur = self.cmb_mapel.currentText()
+        lines = ([n for n, _ in s.da_map_names()] if da
+                 else list(getattr(self, '_window_lines', [])))
+        self.cmb_mapel.clear()
+        self.cmb_mapel.addItems(lines)
+        if cur in lines:
+            self.cmb_mapel.setCurrentText(cur)
+        self.cmb_bg.setEnabled(not da)
 
     @user_action
     def on_map_step(self, step):
@@ -1816,8 +1890,10 @@ class MainWindow(QtWidgets.QMainWindow):
             for sh in sorted(b.available):
                 if o.e_low <= s.map_line_energy(b.Z, sh) <= o.e_high:
                     lines.append(s.map_line_name(b.Z, sh))
-        self.cmb_mapel.clear()
-        self.cmb_mapel.addItems(lines)
+        self._window_lines = lines
+        if self.cmb_kind.currentIndex() == 0:
+            self.cmb_mapel.clear()
+            self.cmb_mapel.addItems(lines)
         n = sum(len(b.available)
                 for b in self.elements.table.buttons.values())
         self.say('Element table set for %.2f-%.2f keV: %d element-shell '
@@ -1859,9 +1935,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.say('DA LOAD FAILED: %s' % ex)
             return
         els = s.dam_elements()
+        self._sync_map_kind(prefer_da=True)       # Maps now shows DA maps
         self.say('DA matrix loaded: %d elements (%s).%s  Calibration left as '
-                 'it was. Analysis > Concentration profiles now gives real '
-                 'deconvolved concentrations.'
+                 'it was. The Maps tab now shows DA maps (wt%%); Analysis > '
+                 'Concentration profiles uses them too.'
                  % (len(els), ', '.join(str(e) for e in els[:14]),
                     ' ...' if len(els) > 14 else ''))
 
@@ -2352,8 +2429,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.say('Show a map first.')
             return
         s = self.session
-        stem = '%s_%s_bin%d' % (meta['stem'] or 'map', meta['element'],
-                                meta['binning'])
+        stem = '%s_%s_%s_bin%d' % (
+            meta['stem'] or 'map', re.sub(r'\W+', '', meta['element']),
+            'DA' if meta['kind'].startswith('DA') else 'window',
+            meta['binning'])
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, 'Export the shown map', stem + '.csv', 'CSV (*.csv)')
         if not path:

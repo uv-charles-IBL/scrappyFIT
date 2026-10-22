@@ -299,6 +299,22 @@ the map is refused. Near the threshold a flank sits on the rising edge of the
 spectrum and reads low, so a light-element net map there reads high. Map browsing never changes the
 spectrum or the fit; only a mask does, and the title then carries its name.
 
+Every map says what it is, in its title, its colour-bar units and the line
+under the controls. There are two kinds (the first box on the row):
+
+- **window**: counts per pixel in an energy window round the line, smoothed by a
+  1-pixel Gaussian. **background** chooses what is subtracted, the same choices
+  as GeoPIXE's window ("cut") images: *linear* (two flanks, interpolated under
+  the peak; the default), *flat, low flank* or *flat, high flank* (one flank),
+  or *none* (raw counts). The line under the controls gives the keV window and
+  the flank channels used.
+- **DA matrix**: concentration in wt% through a GeoPIXE DA matrix (File > Load
+  DA matrix). Every event adds its channel's weight for that element, so
+  overlapping lines and the background are resolved as in GeoPIXE's own
+  images. Loading a matrix switches the tab to DA maps and lists the matrix's
+  elements; switch back to *window* for any other line. Opening another file
+  drops the matrix and returns to window maps.
+
 Then either:
 
 - **drag a rectangle** on the map, or
@@ -358,7 +374,7 @@ one model genuinely cannot describe two different materials at once.
 that fails where a weak line sits between two strong ones. Aluminium between
 magnesium and silicon is the standard case: the map goes negative and is
 meaningless. scrappyFIT warns you when a net map comes out mostly negative.
-Untick *subtract background* and read raw counts, or use a DA matrix map,
+Set **background** to *none* and read raw counts, or use a DA matrix map,
 which resolves overlaps properly.
 
 ### 3.6 Export

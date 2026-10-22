@@ -480,6 +480,51 @@ MAP_SCALES = ('linear', 'log', 'sqrt')
 MAP_BAR_PX = 90
 #: Default colour limits, percentiles of the shown map.
 MAP_PCT = (2.0, 99.0)
+#: What a Maps tab map is made from (Session.element_map / da_map).
+MAP_KINDS = ('window', 'DA matrix')
+#: Window backgrounds (label, Session.element_map key), as GeoPIXE's cut
+#: types: X0-X5 linear, the old one-flank cut, the plain cut
+#: (analyze_cut.pro:74-103, 50-71, 19-34).
+MAP_BACKGROUNDS = (('linear (two flanks)', 'linear'),
+                   ('flat, low flank', 'low'),
+                   ('flat, high flank', 'high'),
+                   ('none (raw counts)', 'none'))
+
+
+def map_kind_short(info):
+    """A few words for the map title: 'WINDOW, net counts', 'DA, wt%'."""
+    if info.get('kind') == 'DA':
+        return 'DA, wt%'
+    if info.get('background') == 'none':
+        return 'WINDOW, raw counts'
+    return 'WINDOW, net counts'
+
+
+def describe_map(info):
+    """One or two sentences saying what a map is (Session.map_info)."""
+    if not info:
+        return 'No map shown.'
+    b = info.get('binning', 1)
+    if info.get('kind') == 'DA':
+        return ('DA map of %s: concentration in wt%% through the GeoPIXE DA '
+                'matrix %s (its "%s" row). Each event adds the matrix weight '
+                'of its channel, so overlapping lines and the background are '
+                'resolved. %dx%d raster px per pixel, unsmoothed.'
+                % (info.get('line'), info.get('matrix'), info.get('dam_name'),
+                   b, b))
+    lo, hi = info['window']
+    k0, k1 = info.get('keV', (float('nan'), float('nan')))
+    bg = info.get('background', 'none')
+    if bg == 'none':
+        back = 'no background subtracted (raw counts)'
+    else:
+        back = 'background %s, channels %s' % (bg, ' and '.join(
+            '%d-%d' % f for f in info.get('flanks', ())))
+    return ('WINDOW map of %s: counts per pixel in %.3f-%.3f keV (channels '
+            '%d-%d); %s. %dx%d raster px per pixel, 1 px Gaussian smoothing. '
+            'A window counts every line under it: overlaps are not '
+            'separated (load a DA matrix for that).'
+            % (info.get('line'), k0, k1, lo, hi, back, b, b))
 
 
 class MapCanvas(_Canvas):
@@ -569,9 +614,10 @@ class MapCanvas(_Canvas):
         if m.any():
             self.polygonSelected.emit(m)
 
-    def show_map(self, data, title='', cmap=None, binning=None):
+    def show_map(self, data, title='', cmap=None, binning=None, units=''):
         """binning: raster pixels per map pixel; inferred from the size if
-        not given, which fails for sizes several binnings make."""
+        not given, which fails for sizes several binnings make. units label
+        the colour bar ('counts / pixel', 'wt%')."""
         self._data = np.asarray(data, dtype=float)
         self._binning = binning
         self.ax.clear()
@@ -600,6 +646,7 @@ class MapCanvas(_Canvas):
             self._img.colorbar_cid = self._img.callbacks.connect(
                 'changed', self._cbar.update_normal)
             self._cbar.update_normal(self._img)
+        self._cbar.set_label(units, fontsize=9, color=INK)
         self.ax.set_xticks([])
         self.ax.set_yticks([])
         self.ax.set_title(title, fontsize=10, color=INK)

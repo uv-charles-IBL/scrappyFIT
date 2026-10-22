@@ -40,6 +40,17 @@ reproducible against a stated version.
   At binnings that divide 256 (1, 2, 4, 8, 16, 32; default 4) no map, mask or DA number changes; a
   script passing a 16- or 8-px mask to `set_mask` must now add `binning=16` or `binning=32`.
 
+### Maps tab: map kinds and backgrounds
+- Every map says what it is. A **window** map (counts in an energy window) or a **DA matrix** map
+  (wt% through a loaded GeoPIXE .dam) is chosen in the first box, and the title (`WINDOW, net counts`,
+  `WINDOW, raw counts`, `DA, wt%`), the colour-bar units and a line under the controls (keV window,
+  channels, background and flanks, or the matrix and its row) state it. Loading a DA matrix switches
+  the tab to DA maps of the matrix's elements; before, DA maps reached only Concentration profiles.
+- Window background choices as GeoPIXE's cut types (`analyze_cut.pro`; geopixe-ref 2026-10-21):
+  linear between two flanks (default, as before), flat from the low or the high flank, or none. The
+  "subtract background" checkbox is gone. `Session.element_map(background=...)`, `Session.da_map`,
+  `Session.da_map_names`. No map number changes for the default (linear) or for "none".
+
 ## 0.26.0 - 2026-10-21: spectrum display, Sabbatucci-Salvat fetched on first use
 
 ### Fixes

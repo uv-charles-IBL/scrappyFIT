@@ -682,6 +682,7 @@ class Session:
         if keep_data is None:
             keep_data = self.events is not None
         self.dam = _gpda.read_dam(str(p))[0]
+        self.dam['file'] = str(p)          # the matrix's own name, for map labels
         if not keep_data:
             self.cal = self.dam['cal']
             self.charge = self.dam['charge']
@@ -815,7 +816,10 @@ class Session:
         """How the Maps tab writes a line: 'Si', 'Ag L', 'Pb M'."""
         return self.db.sym[Z] + {1: '', 2: ' L', 3: ' M'}[shell]
 
-    def element_map(self, which, width=0.075, binning=4, subtract=True):
+    MAP_BACKGROUNDS = ('linear', 'low', 'high', 'none')
+
+    def element_map(self, which, width=0.075, binning=4, subtract=True,
+                    background=None):
         """Window map for one line. Needs list-mode data.
 
         which   a line ('Si', 'Ag L', 'AgL', 'Pb M'; see parse_line) or an
@@ -824,10 +828,29 @@ class Session:
                 all-zero map looks like data, and a percentile mask on it
                 selects every pixel (287424, 2026-10-20).
 
+        background, as GeoPIXE's window ("cut") types (analyze_cut.pro;
+        geopixe-ref 2026-10-21):
+                'linear'  two flanks, interpolated under the peak (X0-X5,
+                          :74-103); the default when subtract is True. A
+                          flank off the populated spectrum is dropped and
+                          the other used flat (maps.flanks).
+                'low', 'high'  one flank, flat (the old one-flank cut,
+                          :50-71, used the high one). Refused if that flank
+                          is off the spectrum.
+                'none'    raw counts in the window (plain cut, :19-34); the
+                          default when subtract is False.
+                Given, background decides and subtract is not read.
+
         Flanking subtraction fails where a weak line sits between two strong
         ones - aluminium between magnesium and silicon is the standard case,
-        and it goes negative. Use da_maps() where a DA matrix exists.
+        and it goes negative. Use da_map() where a DA matrix exists.
+        self.map_info says afterwards what was made.
         """
+        if background is None:
+            background = 'linear' if subtract else 'none'
+        if background not in self.MAP_BACKGROUNDS:
+            raise ValueError('background must be one of %s, not %r'
+                             % (self.MAP_BACKGROUNDS, background))
         if self.events is None:
             raise RuntimeError('maps need a list-mode (.lmf) file')
         self.map_info = {}           # nothing stale if this map fails
@@ -844,7 +867,7 @@ class Session:
                              '(channels 0-%d, %.2f-%.2f keV)'
                              % (which, E0, nch - 1, b, a * (nch - 1) + b))
         bg = None
-        if subtract:
+        if background != 'none':
             # flanks only from channels that hold events: below the zero of
             # energy and past the last count there is nothing to read. The
             # first count is the detector threshold, and a flank just above
@@ -856,12 +879,20 @@ class Session:
                         int(nz[0]) if nz.size else 0, 0)
             last = int(nz[-1]) if nz.size else nch - 1
             bg = _maps.flanks(lo, hi, first, last)
+            if background in ('low', 'high'):
+                bg = tuple(f for f in bg if (f[1] < lo) == (background == 'low'))
+                if not bg:
+                    raise ValueError('%s: the %s flank is off the spectrum'
+                                     % (which, background))
             if not bg:
                 raise ValueError('%s: neither background flank is on the '
                                  'spectrum; map it without subtraction'
                                  % (which,))
         self.map_info = dict(
             kind='window', line=str(which), energy=E0, window=(lo, hi),
+            keV=(a * lo + b, a * hi + b), binning=binning,
+            units='counts / pixel', smoothing='1 px Gaussian',
+            asked=background,
             background=('none' if bg is None else
                         'linear between flanks' if len(bg) == 2 else
                         'flat, %s flank only'
@@ -870,6 +901,46 @@ class Session:
         x, y, e = self.events
         return _maps.smooth(
             _maps.element_map(x, y, e, lo, hi, bg=bg, binning=binning), 1.0)
+
+    def da_map_names(self):
+        """The loaded DA matrix's element maps, in Maps tab names ('Si',
+        'V L'), with GeoPIXE's own name for each: [(name, dam_name)]. The
+        background and sum rows are left out, as GeoPIXE hides them
+        (image_eventcb.pro:4244)."""
+        out = []
+        for el in self.dam_elements():
+            if str(el).startswith(('Back', 'sum', 'Sum')):
+                continue
+            try:
+                nm = self.map_line_name(*self.parse_line(el))
+            except ValueError:
+                nm = str(el)
+            out.append((nm, el))
+        return out
+
+    def da_map(self, which, binning=4):
+        """One DA map (wt%), by Maps tab name ('V L') or the matrix's own
+        ('VL'). Unsmoothed, as GeoPIXE shows DA images. Sets map_info."""
+        self.map_info = {}
+        names = self.da_map_names()
+        key = str(which).strip()
+        hit = [d for n, d in names if key in (n, d)]
+        if not hit:
+            try:
+                want = self.map_line_name(*self.parse_line(key))
+                hit = [d for n, d in names if n == want]
+            except ValueError:
+                pass
+        if not hit:
+            raise ValueError('%s is not in the DA matrix (%s)'
+                             % (which, ', '.join(n for n, _ in names)))
+        m = self.da_maps(binning=binning, elements=[hit[0]])[hit[0]]
+        self.map_info = dict(
+            kind='DA', line=key, dam_name=hit[0], binning=binning,
+            units='wt%', smoothing='none',
+            matrix=os.path.basename(str(self.dam.get('file') or 'DA matrix')),
+            background='DA matrix background rows')
+        return m
 
     def da_maps(self, binning=4, elements=None):
         """Concentration maps (wt%) through a loaded GeoPIXE DA matrix, which
