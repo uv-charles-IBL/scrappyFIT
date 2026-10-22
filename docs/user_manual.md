@@ -309,6 +309,11 @@ Then either:
 Either way the spectrum becomes the sum over just those pixels. Refit, and you
 are analysing that region rather than the whole field.
 
+Any binning works. One that does not divide 256 (3, 5, 6, ...) leaves the
+last row and column of the map partial: at binning 3 they hold one raster
+column, so a window map reads about a third as high there and a percentile
+mask passes them over. A DA map is per unit charge and reads normally.
+
 The active mask is drawn on the map (light tint, cyan outline). **grow** and
 **shrink** move its edge by one displayed pixel (the binning: 4 raster pixels
 at the default) whichever tool made it, so a rectangle stays a rectangle.

@@ -31,6 +31,7 @@ from . import config
 from . import yieldset as _yieldset
 from .analysis import damaps as _damaps
 from .analysis import maps as _maps
+from .analysis import masking as _masking
 from .fitting import fit as _fit
 from .fitting.background import snip
 from .io import gpda as _gpda
@@ -881,7 +882,7 @@ class Session:
         return _damaps.da_maps(self.dam, x, y, e, binning=binning,
                                elements=elements)
 
-    def set_mask(self, mask, name=''):
+    def set_mask(self, mask, name='', binning=None):
         """Restrict the active spectrum to a region of the raster.
 
         This is the point of mapping: the bulk spectrum of a heterogeneous
@@ -890,10 +891,9 @@ class Session:
         if self.events is None:
             raise RuntimeError('masking needs a list-mode file')
         x, y, e = self.events
-        m = np.asarray(mask, dtype=bool)
-        if m.shape[0] != 256:
-            f = 256 // m.shape[0]
-            m = np.repeat(np.repeat(m, f, 0), f, 1)
+        # binning: of a map-shaped mask; needed where the map size alone
+        # does not say (16 and 17 both make 16 px; masking.bin_factor)
+        m = _masking.to_raster(mask, 256, binning)
         sel = m[y, x]
         self.mask, self.mask_name = m, name
         self.spectrum = np.bincount(

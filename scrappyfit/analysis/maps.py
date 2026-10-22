@@ -22,8 +22,14 @@ def window(e_lo, e_hi, cal_a, cal_b):
 def element_map(x, y, e, ch_lo, ch_hi, bg=None, nbin=256, binning=1):
     """2-D counts map for channels [ch_lo, ch_hi], optionally background
     subtracted using bg = ((lo1,hi1),(lo2,hi2)) flanking windows, or one
-    window ((lo,hi),) for a flat background from one side."""
-    n = nbin // binning
+    window ((lo,hi),) for a flat background from one side.
+
+    The map is ceil(nbin / binning) pixels a side, so every raster pixel has
+    one; at a binning that does not divide nbin the last row and column
+    cover fewer raster pixels (nbin // binning wrapped x = 255 at binning 3
+    into the next row and lost the top row).
+    """
+    n = -(-nbin // binning)
     xi = (x // binning).astype(np.int32)
     yi = (y // binning).astype(np.int32)
 

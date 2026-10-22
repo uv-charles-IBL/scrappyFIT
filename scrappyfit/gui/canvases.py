@@ -503,6 +503,7 @@ class MapCanvas(_Canvas):
         self._img = None
         self._cbar = None
         self._data = None
+        self._binning = None
         self._mask_art = []
         # display settings survive Show map, so stepping through elements
         # keeps the scale the user chose
@@ -568,8 +569,11 @@ class MapCanvas(_Canvas):
         if m.any():
             self.polygonSelected.emit(m)
 
-    def show_map(self, data, title='', cmap=None):
+    def show_map(self, data, title='', cmap=None, binning=None):
+        """binning: raster pixels per map pixel; inferred from the size if
+        not given, which fails for sizes several binnings make."""
         self._data = np.asarray(data, dtype=float)
+        self._binning = binning
         self.ax.clear()
         self._mask_art = []
         if cmap is not None:
@@ -700,7 +704,7 @@ class MapCanvas(_Canvas):
         """Raster pixels per displayed pixel (1 before any map is shown)."""
         if self._data is None:
             return 1
-        return max(raster // self._data.shape[0], 1)
+        return MSK.bin_factor(self._data.shape[0], raster, self._binning)
 
     def set_mask(self, mask):
         """Outline the active mask over the map; None removes it.
@@ -716,8 +720,13 @@ class MapCanvas(_Canvas):
         self._mask_art = []
         if mask is not None and self._data is not None:
             m = np.asarray(mask, dtype=float)
-            n = self._data.shape[0]
-            ext = (-0.5, n - 0.5, -0.5, n - 0.5)
+            # raster pixels on the map's grid: map pixel i covers raster
+            # pixels i*b .. i*b+b-1, so the raster's far edge is at
+            # 256/b - 0.5, short of the last (partial) map pixel's edge
+            # when b does not divide the raster
+            b = self.binning(m.shape[0])
+            r = m.shape[0] / float(b)
+            ext = (-0.5, r - 0.5, -0.5, r - 0.5)
             tint = np.zeros(m.shape + (4,))
             tint[m > 0] = (0.35, 0.85, 1.0, 0.30)
             self._mask_art.append(self.ax.imshow(

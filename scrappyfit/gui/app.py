@@ -112,9 +112,8 @@ def export_map_csv(path, data, session, meta):
     out = [path]
     m = session.mask
     if m is not None:
-        ny, nx = data.shape
-        fy, fx = m.shape[0] // ny, m.shape[1] // nx
-        frac = m[:ny * fy, :nx * fx].reshape(ny, fy, nx, fx).mean(axis=(1, 3))
+        frac = MSK.map_fraction(m, data.shape[0], m.shape[0],
+                                meta.get('binning'))
         mpath = os.path.splitext(path)[0] + '_mask.csv'
         np.savetxt(mpath, frac, delimiter=',', fmt='%.4g',
                    header=head + '; mask %s, fraction of each pixel'
@@ -1514,7 +1513,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         self.map.show_map(m, '%s   (%dx%d bin%s)'
                           % (el, self.spin_bin.value(), self.spin_bin.value(),
-                             ', net' if self.chk_sub.isChecked() else ', raw'))
+                             ', net' if self.chk_sub.isChecked() else ', raw'),
+                          binning=self.spin_bin.value())
         # what made this map, taken now: a later open or calibration edit
         # must not relabel numbers it did not produce
         self._map_meta = dict(
@@ -2416,6 +2416,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._apply_mask(m, self.session.mask_name or 'mask', combine=False)
 
+    def _mask_binning(self, m):
+        """Binning of a mask made on the shown map (None for a raster one)."""
+        m = np.asarray(m)
+        if (m.shape == (256, 256) or self.map._data is None
+                or m.shape != self.map._data.shape):
+            return None
+        return self.map.binning()
+
     def _apply_mask(self, m, name, combine=True):
         """Make m (map- or raster-shaped) the session mask, or with the
         mask op set, add it to or take it from the current one."""
@@ -2427,11 +2435,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # itself (our choice; not checked against GeoPIXE's exclude)
             cur = np.ones((256, 256), dtype=bool)
         if op != 'replace' and cur is not None:
-            f = cur.shape[0] // m.shape[0]
-            r = np.repeat(np.repeat(np.asarray(m, bool), f, 0), f, 1)
-            if r.shape != cur.shape:
-                self.say('MASK FAILED: a %dx%d map does not tile the %dx%d '
-                         'raster' % (m.shape + cur.shape))
+            try:
+                r = MSK.to_raster(m, cur.shape[0], self._mask_binning(m))
+            except ValueError as ex:
+                self.say('MASK FAILED: %s' % ex)
                 return
             m = MSK.combine(cur, r, 'or' if op == 'add' else 'sub')
             if self.session.mask is not None and (m == cur).all():
@@ -2442,7 +2449,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.say('That would leave an empty mask - mask kept.')
                 return
         try:
-            n = self.session.set_mask(m, name)
+            n = self.session.set_mask(m, name, self._mask_binning(m))
         except Exception as ex:
             self.say('MASK FAILED: %s' % ex)
             return

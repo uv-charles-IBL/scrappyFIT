@@ -27,6 +27,18 @@ reproducible against a stated version.
   use a DA map. A line near the top of the spectrum likewise no longer reads an empty high flank.
   A percentile mask cut from a net C or N map now selects different pixels, so that region's
   spectrum and fit change; unmasked fits do not.
+- Masks work at a binning that does not divide 256 (3, 5, 6, 7, ...). Window and DA maps are now
+  ceil(256 / binning) pixels a side (binning 3: 86, was 85), so the last raster row and column have a
+  pixel: `nbin // binning` wrapped x = 255 into the next row and dropped the top row, and a rectangle
+  on the map raised `MASK FAILED` (IndexError). The last pixel is partial; a DA map divides each pixel
+  by the charge of its own raster pixels, so it reads like the rest; a window (counts) map's last row
+  and column read low in proportion (a third at binning 3), so a percentile mask skips them. The mask
+  overlay sits on the raster's true extent. `analysis/masking.py` gains `bin_factor`, `to_raster` and
+  `map_fraction`; the Maps tab passes the binning with every mask, because the map size alone is
+  ambiguous above binning 15 (16 and 17 both make 16 px) and `Session.set_mask` now refuses an
+  ambiguous map-shaped mask unless `binning=` says which.
+  At binnings that divide 256 (1, 2, 4, 8, 16, 32; default 4) no map, mask or DA number changes; a
+  script passing a 16- or 8-px mask to `set_mask` must now add `binning=16` or `binning=32`.
 
 ## 0.26.0 - 2026-10-21: spectrum display, Sabbatucci-Salvat fetched on first use
 
