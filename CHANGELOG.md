@@ -4,7 +4,9 @@ Versions follow [semantic versioning](https://semver.org). Physics changes
 that alter fitted numbers are always called out, because a result is only
 reproducible against a stated version.
 
-## Unreleased (since v0.26.0)
+## Unreleased (since v0.27.0)
+
+## 0.27.0 - 2026-10-21: fits independent of BLAS threads; Maps tab with GeoPIXE image tools
 
 ### Physics that changes fitted numbers
 - Fits no longer depend on the BLAS thread count (BUGS.md "Fitted numbers depend on the BLAS
