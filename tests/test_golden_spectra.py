@@ -14,7 +14,9 @@ run duration and the pile-up cap is off (``Session.pileup_cap`` returns
 None). Fits from the original .lmf files will not match these numbers
 exactly for that reason.
 
-Pinned 2026-10-18 from master 6c0718b with this file's recipes.
+Pinned 2026-10-18 from master 6c0718b with this file's recipes. Re-pinned
+2026-10-21 on fix/blas-threads (thread-independent fits): 287424 in full,
+404003 in full, 404004 Fano; quartz and 404001 unchanged (CHANGELOG).
 """
 import math
 import os
@@ -32,13 +34,16 @@ DET = DATA / 'Amptek_25_C1_deflector.detector'
 RESP = (pathlib.Path(__file__).parents[1] / 'scrappyfit' / 'resources'
         / 'response' / 'amptek_c1_25mm2_20260923.json')
 
-# Machine-specific (2026-10-19). The pinned values reproduce on the lab desktop
-# they were made on (Windows 11) and nowhere else tried: 287424 gives chi2r 2.3259 there and
-# 2.3816 on Linux and on a GitHub Windows runner with the same numpy 1.26.4 /
-# scipy 1.11.3, and 404003 and 404004 move their widths (CI run 39296724668;
-# lab knowledge base, findings/scrappyfit-scipy-version-sensitivity.md). The fit
-# has nearby minima and the CPU's BLAS kernels pick between them, so on another
-# machine a failure says nothing about the code. CI sets CI=true and skips;
+# Machine-specific, in part. The 2026-10-18 pins reproduced only on the lab
+# desktop: 287424 gave chi2r 2.3259 there and 2.3816 on Linux and a GitHub
+# Windows runner (CI run 39296724668). That was the desktop's 16 BLAS threads:
+# with one thread it gives 2.3816 too. Since fix/blas-threads (2026-10-21) a
+# fit does not depend on the thread count, and 287424, quartz and 404001
+# reproduce across numpy 1.26 / 2.5 on that desktop. 404003 and 404004 still do
+# not: their widths move about 0.2 % (PARS_RTOL is 0.1 %) with last-bit changes
+# such as another numpy or CPU (BUGS.md, 2026-10-21; lab knowledge base,
+# findings/scrappyfit-scipy-version-sensitivity.md). On another machine a
+# failure of those two says nothing about the code. CI sets CI=true and skips;
 # SCRAPPYFIT_RUN_GOLDEN=1 runs them anyway. The five spectra are lab data and
 # not in the public repository (tests/labdata.py says where they are looked
 # for); without them every case skips.
@@ -49,10 +54,10 @@ pytestmark = [
     pytest.mark.skipif(config.database_path(required=False) is None,
                        reason='no GeoPIXE database available'),
     pytest.mark.skipif(_ON_CI, reason=(
-        'golden spectra are pinned to the desktop they were made on; other '
-        'machines land 287424/404003/404004 in a different minimum with the '
-        'same library versions (BUGS.md, 2026-10-19). Run them locally before '
-        'merging; SCRAPPYFIT_RUN_GOLDEN=1 forces them here.')),
+        'golden spectra are lab data, pinned on the desktop they were made '
+        'on; 404003/404004 widths move ~0.2 % on other machines and library '
+        'versions (BUGS.md, 2026-10-21). Run them locally before merging; '
+        'SCRAPPYFIT_RUN_GOLDEN=1 forces them here.')),
 ]
 
 AREA_RTOL = 0.005       # 0.5 % of the area ...
@@ -205,27 +210,27 @@ EXPECTED = {
             'Cl':                   (308.6311, 44.92),
         }),  # not pinned (area < 4 sigma): K
     '404003_ga2o3': dict(
-        chi2r=1.34791,
-        pars=(38.1076, 24.991, 1201.58, 510.053),
+        chi2r=1.35018,
+        pars=(38.1036, 25.0451, 1201.62, 510.053),
         areas={
             # Al Kb/Ka = 2.524 x 0.013 = 0.033; the table's 0.013 is too low
             # for solids (BUGS.md "Si and Al Kb/Ka"), which is why Kb is free.
-            'AlKb':                 (1399442, 4.659e+04),
-            'Al':                   (554646.8, 873.5),
-            'GaL':                  (125174.9, 394.3),
-            'O':                    (65828.76, 272.4),
-            'AuM5':                 (39061.07, 238.8),
-            'AuM4':                 (22251.34, 203.8),
-            'Ti':                   (7152.967, 85.9),
-            'AuM3':                 (3764.213, 129.7),
-            'AuMz':                 (2281.801, 124.3),
-            'N':                    (1533.301, 71.5),
-            'AuM2':                 (997.8632, 107.1),
-            'Si':                   (728.5026, 83.01),
+            'AlKb':                 (1363270, 4.655e+04),
+            'Al':                   (555028.3, 873.8),
+            'GaL':                  (125181.3, 394.3),
+            'O':                    (65828.28, 272.4),
+            'AuM5':                 (39112.67, 239),
+            'AuM4':                 (22203.59, 203.8),
+            'Ti':                   (7153.517, 85.9),
+            'AuM3':                 (3764.421, 129.8),
+            'AuMz':                 (2307.723, 124.4),
+            'N':                    (1537.792, 71.55),
+            'AuM2':                 (999.222, 107.2),
+            'Si':                   (720.6023, 83.04),
         }),  # not pinned (area < 4 sigma): AuM1, C
     '404004_sic': dict(
         chi2r=1.9944,
-        pars=(40.9898, 21.9016, 1200.22, 506.165),
+        pars=(40.9898, 21.9466, 1200.22, 506.165),
         areas={
             # Si Kb/Ka = 1.578 x 0.0273 = 0.043, the measured solid value; the
             # table's 0.027 is WRONG for solids (BUGS.md "Si and Al Kb/Ka").
@@ -242,35 +247,35 @@ EXPECTED = {
     '287424_perovskite': dict(
         # Relative regression only: the absolute scale on this run is biased
         # by aperture vignetting (RETRACTED.md R13, R15).
-        chi2r=2.32594,
-        pars=(34.7563, 28.1844, 1449.75, 588.789),
+        chi2r=2.38158,
+        pars=(35.9506, 26.911, 1449.75, 588.789),
         areas={
-            'Si':                   (216083.7, 484.7),
-            'IL':                   (34682.27, 211.4),
-            'PbM5':                 (31030.22, 193.4),
-            'AgL':                  (27167.23, 230.7),
-            'Ca':                   (18128.72, 177.8),
-            'PbM4':                 (15722.73, 149.7),
-            'InL':                  (15007.76, 349.9),
-            'BrL':                  (13308.95, 610.8),
+            'Si':                   (217090, 487),
+            'IL':                   (34459.95, 210.5),
+            'PbM5':                 (31083.23, 193.4),
+            'AgL':                  (26946.47, 228.5),
+            'Ca':                   (17966.84, 176.5),
+            'PbM4':                 (15724.84, 149.3),
+            'InL':                  (14742.33, 344.4),
+            'BrL':                  (14115.8, 612.5),
             # Degenerate with Ag M at 0.31 keV (RETRACTED.md R3).
-            'C':                    (9918.004, 527.7),
-            'IM3':                  (8629.967, 657.5),
-            'PbMz':                 (6297.208, 177.3),
-            'IM2':                  (6238.232, 472.8),
-            'Mg':                   (4636.299, 104.2),
-            'Na':                   (4551.021, 558.4),
-            'SnL':                  (4133.331, 206.2),
-            'K':                    (3210.854, 230.9),
-            'CsM1':                 (3209.907, 582.8),
-            'PbM3':                 (2332.423, 127.7),
-            # Instrument artefact at the Si Ka level, not sample Al
-            # (RETRACTED.md R11 item 2, "claims NOT retracted").
-            'Al':                   (2159.324, 524.6),
-            'Cl':                   (372.0896, 80.24),
+            'C':                    (9828.795, 586.6),
+            'IM3':                  (8644.389, 701.4),
+            'PbMz':                 (6299.316, 177.2),
+            'IM2':                  (6092.393, 497.1),
+            'Mg':                   (4544.464, 104.6),
+            'Na':                   (4896.446, 566),
+            'SnL':                  (4310.125, 202.5),
+            'K':                    (3307.243, 227.6),
+            'CsM1':                 (2691.509, 589.5),
+            'PbM3':                 (2379.517, 127),
+            'Cl':                   (318.4642, 79.27),
         }),  # not pinned (area < 4 sigma): O, IM5, SnM4, InM4, AgM2, N, AgM5,
-             # InM3, AgM3, IM1, SnM1, pileup. O vs I M and N vs In/Sn M are
-             # the degeneracies of RETRACTED.md R3 and the project README.
+             # InM3, AgM3, IM1, SnM1, pileup, and Al (1432 +- 525 since
+             # fix/blas-threads; an instrument artefact at the Si Ka level, not
+             # sample Al: RETRACTED.md R11 item 2, "claims NOT retracted").
+             # O vs I M and N vs In/Sn M are the degeneracies of
+             # RETRACTED.md R3 and the project README.
     'quartz': dict(
         chi2r=1.99083,
         pars=(36.2896, 27.4343, 1450.2, 588.789),

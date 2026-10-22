@@ -1,13 +1,15 @@
 # Versions the golden spectra (tests/test_golden_spectra.py) were pinned with,
-# on the lab desktop (Windows 11), 2026-10-18. They keep CI's libraries fixed,
-# but they do NOT make the golden fits portable: 287424 gives chi2r 2.3259 on
-# that desktop and 2.3816 on Linux and on a GitHub Windows runner with these
-# same versions (CI, 2026-10-19). The split follows the CPU's BLAS kernels.
+# on the lab desktop (Windows 11), 2026-10-18 (re-pinned 2026-10-21). They keep
+# CI's libraries fixed. The 2026-10-19 split (287424 chi2r 2.3259 on that
+# desktop, 2.3816 on Linux and a GitHub Windows runner) was the desktop's 16
+# BLAS threads; fits are thread-independent since fix/blas-threads, but
+# 404003/404004 widths still move ~0.2 % across machines (BUGS.md, 2026-10-21).
 # Recorded in the lab knowledge base, findings/scrappyfit-scipy-version-sensitivity.md.
-# The golden spectra are therefore skipped on CI and run on that desktop.
+# The golden spectra are lab data, skipped on CI and run on that desktop.
 numpy==1.26.4
 scipy==1.11.3
 xraylib==4.3.0
 xraydb==4.5.8
 matplotlib==3.8.0
 PyQt5==5.15.11
+threadpoolctl==3.6.0

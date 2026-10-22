@@ -6,6 +6,43 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.26.0)
 
+### Physics that changes fitted numbers
+- Fits no longer depend on the BLAS thread count (BUGS.md "Fitted numbers depend on the BLAS
+  thread count"). The linear step's Gram product, matrix-vector products and inverse no longer
+  use BLAS (einsum, and an equilibrated Gauss-Jordan inverse with one refinement step, in
+  `fitting/fit.py`). The prior-scale first pass is the same normal-equations solve, not
+  `lstsq`. `least_squares` runs with every BLAS held to one thread (threadpoolctl). That hold
+  is process-wide: while it lasts, BLAS calls from other threads in the process also run on
+  one thread. Results are bit-identical at `OMP_NUM_THREADS` 1, 4 and 16 (quartz, 287424) and
+  across numpy 1.26 / 2.5 for 287424 (to 1e-14). The solve's residual is 7e-16 on 287424's
+  cond-2e15 system, against 4e-12 for `lstsq` (scratch `accuracy.py`, 2026-10-21). The
+  desktop's old 287424 value (chi2r 2.3259) came from its 16 BLAS threads. Master at one
+  thread gives 2.3816, the value Linux and the GitHub runner gave. 287424 now takes 3.5x longer on the lab desktop (152 s vs 43 s, same
+  load) because its optimiser path is longer, not because each step costs more (BUGS.md,
+  2026-10-21; scratch `count.py`, 3 interleaved runs, 20:32-20:43). Quartz is about 20 %
+  faster (7.4-7.8 s vs 8.9-12.0 s, same runs). Concurrent fits share the one-thread hold
+  (reference-counted). A missing threadpoolctl is an error, not a silently skipped refinement.
+  Golden values moved (`tests/test_golden_spectra.py`; values from its `run_case` on the lab
+  desktop, scratch `case.py`, 2026-10-21; quartz and 404001 stay within tolerance and are
+  unchanged; the fit sigmas of the re-pinned areas were re-pinned with them):
+  - 287424: chi2r 2.32594 -> 2.38158, noise 34.7563 -> 35.9506, Fano 28.1844 -> 26.911, Si
+    216083.7 -> 217090, IL 34682.27 -> 34459.95, PbM5 31030.22 -> 31083.23, AgL 27167.23 ->
+    26946.47, Ca 18128.72 -> 17966.84, PbM4 15722.73 -> 15724.84, InL 15007.76 -> 14742.33, BrL
+    13308.95 -> 14115.8, C 9918.004 -> 9828.795, IM3 8629.967 -> 8644.389, PbMz 6297.208 ->
+    6299.316, IM2 6238.232 -> 6092.393, Mg 4636.299 -> 4544.464, Na 4551.021 -> 4896.446, SnL
+    4133.331 -> 4310.125, K 3210.854 -> 3307.243, CsM1 3209.907 -> 2691.509, PbM3 2332.423 ->
+    2379.517, Al 2159.324 -> 1432.126 (now 2.7 sigma, unpinned), Cl 372.0896 -> 318.4642.
+  - 404003: chi2r 1.34791 -> 1.35018, noise 38.1076 -> 38.1036, Fano 24.991 -> 25.0451, cal a[2]
+    1201.58 -> 1201.62, AlKb 1399442 -> 1363270, Al 554646.8 -> 555028.3, GaL 125174.9 ->
+    125181.3, O 65828.76 -> 65828.28, AuM5 39061.07 -> 39112.67, AuM4 22251.34 -> 22203.59, Ti
+    7152.967 -> 7153.517, AuM3 3764.213 -> 3764.421, AuMz 2281.801 -> 2307.723, N 1533.301 ->
+    1537.792, AuM2 997.8632 -> 999.222, Si 728.5026 -> 720.6023.
+  - 404004: Fano 21.9016 -> 21.9466.
+
+### Dependencies
+- New runtime dependency: threadpoolctl >= 3.0 (BSD-3-Clause; CI pins 3.6.0 in
+  `ci-constraints.txt`). It holds BLAS to one thread around `least_squares`.
+
 ## 0.26.0 - 2026-10-21: spectrum display, Sabbatucci-Salvat fetched on first use
 
 ### Fixes

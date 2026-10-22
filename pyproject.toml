@@ -21,6 +21,7 @@ dependencies = [
     "PyQt5>=5.15",
     "xraylib>=4.1",
     "xraydb>=4.5",
+    "threadpoolctl>=3.0",
 ]
 
 [project.optional-dependencies]
