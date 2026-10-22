@@ -14,7 +14,7 @@ import numpy as np
 
 
 def da_maps(dam, x, y, e, nbin=256, binning=1, elements=None):
-    n = nbin // binning
+    n = -(-nbin // binning)          # ceil: every raster pixel has a pixel
     xi = (x // binning).astype(np.int64)
     yi = (y // binning).astype(np.int64)
     pix = yi * n + xi
@@ -22,6 +22,10 @@ def da_maps(dam, x, y, e, nbin=256, binning=1, elements=None):
     ok = (e >= 0) & (e < size)
     pix, ee = pix[ok], e[ok].astype(np.int64)
 
+    # raster pixels in each map pixel: b*b, fewer in a partial edge pixel at
+    # a binning that does not divide nbin
+    side = np.minimum(nbin - np.arange(n) * binning, binning)
+    area = np.outer(side, side).astype(float)
     out = {}
     for j, el in enumerate(dam['el']):
         if elements is not None and el not in elements:
@@ -30,6 +34,7 @@ def da_maps(dam, x, y, e, nbin=256, binning=1, elements=None):
             continue
         w = dam['matrix'][j][ee]
         img = np.bincount(pix, weights=w, minlength=n * n).reshape(n, n)
-        # each pixel receives charge/npix, not the whole run's charge
-        out[el] = img * (n * n) / dam['charge'] / 1e4      # wt%
+        # each pixel receives the charge of its raster pixels,
+        # charge * area / nbin**2, not the whole run's charge
+        out[el] = img * (nbin * nbin) / area / dam['charge'] / 1e4   # wt%
     return out

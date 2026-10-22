@@ -38,7 +38,8 @@ from ..io import sabbatucci
 from ..io.live import LiveLMF, refresh_session
 from ..physics import artefacts, lineid
 from ..session import FitOptions, Session
-from .canvases import (LEGEND_MODES, MAP_CMAPS, MAP_PCT, MAP_SCALES,
+from .canvases import (LEGEND_MODES, MAP_BACKGROUNDS, MAP_CMAPS, MAP_KINDS,
+                       MAP_PCT, MAP_SCALES, describe_map, map_kind_short,
                        MapCanvas, SpectrumCanvas, toolbar_for)
 from .dialogs import ElementDialog, SampleModelDialog
 from .layerview import LayerStackDialog
@@ -108,13 +109,14 @@ def export_map_csv(path, data, session, meta):
             'cal %.10g keV/ch, %.10g keV; row 0 = bottom (y = 0)'
             % (meta['label'], meta['element'], meta['kind'], meta['binning'],
                data.shape[1], data.shape[0], a, b))
+    if meta.get('description'):
+        head += '\n' + meta['description']
     np.savetxt(path, data, delimiter=',', fmt='%.8g', header=head)
     out = [path]
     m = session.mask
     if m is not None:
-        ny, nx = data.shape
-        fy, fx = m.shape[0] // ny, m.shape[1] // nx
-        frac = m[:ny * fy, :nx * fx].reshape(ny, fy, nx, fx).mean(axis=(1, 3))
+        frac = MSK.map_fraction(m, data.shape[0], m.shape[0],
+                                meta.get('binning'))
         mpath = os.path.splitext(path)[0] + '_mask.csv'
         np.savetxt(mpath, frac, delimiter=',', fmt='%.4g',
                    header=head + '; mask %s, fraction of each pixel'
@@ -416,6 +418,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # a draw queued now would run after the canvases are deleted
         self.spec.cancel_draws()
         self.map.cancel_draws()
+        if getattr(self, 'assocview', None) is not None:
+            self.assocview.canvas.cancel_draws()
         log_event('window closed')
         super().closeEvent(ev)
 
@@ -848,8 +852,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_bin = QtWidgets.QSpinBox()
         self.spin_bin.setRange(1, 32)
         self.spin_bin.setValue(4)
-        self.chk_sub = QtWidgets.QCheckBox('subtract background')
-        self.chk_sub.setChecked(True)
+        # What a map is, chosen and then stated on it: a WINDOW map counts
+        # events in an energy window (GeoPIXE's "cut" images, with its three
+        # background types, analyze_cut.pro), a DA map projects every event
+        # through a loaded GeoPIXE DA matrix (wt%, overlaps resolved).
+        self.cmb_kind = QtWidgets.QComboBox()
+        self.cmb_kind.addItems(MAP_KINDS)
+        self.cmb_kind.setToolTip(
+            'window: counts in an energy window round the line.  DA matrix: '
+            'concentration (wt%) through a loaded GeoPIXE .dam, overlaps '
+            'and background resolved (File > Load DA matrix)')
+        self.cmb_kind.currentTextChanged.connect(self.on_map_kind)
+        self.btn_map_pick = QtWidgets.QToolButton()
+        self.btn_map_pick.setText('table...')
+        self.btn_map_pick.setToolTip('Pick the line from a periodic table')
+        self.btn_map_pick.clicked.connect(self.on_map_pick)
+        self.cmb_bg = QtWidgets.QComboBox()
+        for lab, key in MAP_BACKGROUNDS:
+            self.cmb_bg.addItem(lab, key)
+        self.cmb_bg.setToolTip(
+            "Window background, as GeoPIXE's cut types. linear: two flanks "
+            'one window-width either side, interpolated under the peak.  '
+            'low / high flank: one flank, flat.  none: raw counts.')
         self.spin_thr = QtWidgets.QSpinBox()
         self.spin_thr.setRange(50, 99)
         self.spin_thr.setValue(90)
@@ -879,12 +903,15 @@ class MainWindow(QtWidgets.QMainWindow):
                        (self.spin_thr, 'percentile')):
             top.addWidget(QtWidgets.QLabel(lab))
             if x is self.cmb_mapel:
+                top.addWidget(self.cmb_kind)
                 top.addWidget(self.btn_map_prev)
                 top.addWidget(x)
                 top.addWidget(self.btn_map_next)
+                top.addWidget(self.btn_map_pick)
                 continue
             top.addWidget(x)
-        top.addWidget(self.chk_sub)
+        top.addWidget(QtWidgets.QLabel('background'))
+        top.addWidget(self.cmb_bg)
         top.addWidget(b_map)
         top.addWidget(b_thr)
         top.addStretch(1)
@@ -933,6 +960,12 @@ class MainWindow(QtWidgets.QMainWindow):
                          'beside it if one is set')
         b_exp.clicked.connect(self.on_export_map)
         row3.addWidget(b_exp)
+        b_assoc = QtWidgets.QPushButton('Associations...')
+        b_assoc.setToolTip('Plot one map against another; a region drawn on '
+                           'the plot selects those pixels as the mask '
+                           "(GeoPIXE's Element Associations)")
+        b_assoc.clicked.connect(self.on_associations)
+        row3.addWidget(b_assoc)
         row3.addStretch(1)
         self.map = MapCanvas()
         self.map_toolbar = toolbar_for(self.map, mw)
@@ -941,6 +974,11 @@ class MainWindow(QtWidgets.QMainWindow):
         mv.addLayout(top)
         mv.addLayout(row2)
         mv.addLayout(row3)
+        # what the shown map is, in words: kind, units, window, background
+        self.lbl_mapkind = QtWidgets.QLabel('No map shown.')
+        self.lbl_mapkind.setWordWrap(True)
+        self.lbl_mapkind.setStyleSheet('color:#333;')
+        mv.addWidget(self.lbl_mapkind)
         mv.addWidget(self.map_toolbar)
         mv.addWidget(self.map, 1)
         self.map.mpl_connect('button_press_event', self.on_map_click)
@@ -1084,6 +1122,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # fit_setup.pro:95-100)
         self.last_shape = None
         self._sync_hold()
+        # a new file drops any DA matrix (Session.reset_data) unless it IS
+        # one: the Maps row follows at once, not at the next Show map
+        self._sync_map_kind(prefer_da=self.session.dam is not None)
+        if getattr(self, 'assocview', None) is not None:
+            self.assocview.reset()
         s = self.session
         self.lbl_file.setText('%s\n%s' % (os.path.basename(path), s.label))
         self.ed_gain.setText('%.7f' % s.cal[0])
@@ -1155,6 +1198,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.session.set_yield_set(*ys)
             self.last_shape = None          # another detector's lines
             self._sync_hold()
+            self._sync_map_kind()
             if y[0]:
                 self.session.set_yield(*y)
             self.yieldChanged.emit()
@@ -1505,32 +1549,170 @@ class MainWindow(QtWidgets.QMainWindow):
         if s.events is None:
             self.say('Maps need a list-mode (.lmf) file.')
             return False
+        self._sync_map_kind()
         el = self.cmb_mapel.currentText().strip()
+        b = self.spin_bin.value()
+        da = self.cmb_kind.currentText() == MAP_KINDS[1]
         try:
-            m = s.element_map(el, binning=self.spin_bin.value(),
-                              subtract=self.chk_sub.isChecked())
+            if da:
+                m = s.da_map(el, binning=b)
+            else:
+                m = s.element_map(el, binning=b,
+                                  background=self.cmb_bg.currentData())
         except Exception as ex:
             self.say('MAP FAILED: %s' % ex)
             return False
-        self.map.show_map(m, '%s   (%dx%d bin%s)'
-                          % (el, self.spin_bin.value(), self.spin_bin.value(),
-                             ', net' if self.chk_sub.isChecked() else ', raw'))
+        info = dict(s.map_info)
+        self.map.show_map(m, '%s   %s   (%dx%d bin)'
+                          % (el, map_kind_short(info), b, b),
+                          binning=b, units=info.get('units', ''))
+        self.lbl_mapkind.setText(describe_map(info))
         # what made this map, taken now: a later open or calibration edit
         # must not relabel numbers it did not produce
         self._map_meta = dict(
-            element=el, binning=self.spin_bin.value(),
-            kind='net' if self.chk_sub.isChecked() else 'raw',
+            element=el, binning=b, kind=map_kind_short(info),
+            description=describe_map(info),
             label=s.label, cal=tuple(s.cal),
             stem=re.sub(r'[^\w.-]+', '_', pathlib.Path(s.path or s.label
                                                         or 'map').stem))
         self.map.set_mask(s.mask)
         self.tabs.setCurrentIndex(1)
-        if self.chk_sub.isChecked() and np.nanmedian(m) < 0:
+        fl = info.get('flanks') or ()
+        if info.get('asked') == 'linear' and len(fl) == 1:
+            self.say('%s: one background flank is off the populated spectrum, '
+                     'so the background is flat from the %s'
+                     % (el, info['background'].split(', ')[1]))
+        if (not da and info.get('background') != 'none'
+                and np.nanmedian(m) < 0):
             self.say('WARNING: this net map is mostly negative. Flanking '
                      'subtraction fails where a weak line sits between strong '
                      'neighbours (Al between Mg and Si is the usual case). '
-                     'Untick "subtract background" and read it as raw counts.')
+                     'Set background to none and read it as raw counts, or '
+                     'load a DA matrix.')
         return True
+
+    def _sync_map_kind(self, prefer_da=False):
+        """DA maps only with a DA matrix loaded; fall back to window maps
+        (and their line list) when it goes, e.g. on opening another file.
+        prefer_da switches to DA maps when there is a matrix. The line list
+        is refilled either way: a second matrix has its own elements."""
+        has = self.session.dam is not None
+        item = self.cmb_kind.model().item(1)
+        if item is not None:
+            item.setEnabled(has)
+        want = 1 if has and (prefer_da or self.cmb_kind.currentIndex() == 1) \
+            else 0
+        if self.cmb_kind.currentIndex() != want:
+            self.cmb_kind.setCurrentIndex(want)   # refills the list
+        elif want == 1:
+            self.on_map_kind(self.cmb_kind.currentText())
+
+    @user_action
+    def on_map_kind(self, kind):
+        """Window and DA maps have their own line lists: the window lines in
+        the fit range, or the matrix's elements."""
+        s = self.session
+        da = kind == MAP_KINDS[1]
+        if da and s.dam is None:
+            self.say('Load a DA matrix first (File > Load DA matrix).')
+            self.cmb_kind.setCurrentIndex(0)
+            return
+        cur = self.cmb_mapel.currentText()
+        lines = ([n for n, _ in s.da_map_names()] if da
+                 else list(getattr(self, '_window_lines', [])))
+        self.cmb_mapel.clear()
+        self.cmb_mapel.addItems(lines)
+        if cur in lines:
+            self.cmb_mapel.setCurrentText(cur)
+        self.cmb_bg.setEnabled(not da)
+
+    @user_action
+    def on_map_pick(self):
+        """Choose the map line from a periodic table of the lines in the
+        list (window lines in the fit range, or the DA matrix's), and map
+        it."""
+        from .maplines import MapLinePicker
+        lines = [self.cmb_mapel.itemText(i)
+                 for i in range(self.cmb_mapel.count())]
+        if not lines:
+            self.say('No map lines yet - open a list-mode file and set the '
+                     'range first.')
+            return
+        d = MapLinePicker(self.session.db, lines,
+                          self.cmb_mapel.currentText(), self)
+        picked = []
+        d.linePicked.connect(picked.append)
+        d.exec_()
+        if picked:
+            self.cmb_mapel.setCurrentText(picked[-1])
+            self.on_map()
+
+    @user_action
+    def on_associations(self):
+        """Element association plot (gui/association.py) over maps made as
+        the Maps tab makes them: same kind, background and binning."""
+        s = self.session
+        if s.events is None:
+            self.say('Associations need a list-mode (.lmf) file.')
+            return
+        from .association import AssociationDialog
+        lines = [self.cmb_mapel.itemText(i)
+                 for i in range(self.cmb_mapel.count())]
+        d = getattr(self, 'assocview', None)
+        if d is None:
+            d = self.assocview = AssociationDialog(lines, self._assoc_map,
+                                                   self)
+            d.maskSelected.connect(self.on_assoc_mask)
+        else:
+            d.set_lines(lines)
+        d.show()
+        d.raise_()
+
+    def _assoc_map(self, name):
+        """(map, title, units, binning) for the association plot. The
+        Maps tab's map_info still describes the map it shows."""
+        s = self.session
+        b = self.spin_bin.value()
+        shown = s.map_info
+        try:
+            if self.cmb_kind.currentText() == MAP_KINDS[1]:
+                m = s.da_map(name, binning=b)
+            else:
+                m = s.element_map(name, binning=b,
+                                  background=self.cmb_bg.currentData())
+            info = dict(s.map_info)
+        finally:
+            s.map_info = shown
+        return m, '%s %s' % (name, map_kind_short(info)), info['units'], b
+
+    @user_action
+    def on_assoc_mask(self, m, name, op, binning):
+        """A region drawn on the association plot: its pixels, as a mask,
+        combined with the current one by op ('replace', 'add', 'and',
+        'subtract'), at the binning of the plotted maps. With no mask set,
+        add and refine make the region itself and subtract takes it from
+        the whole field, as the Maps tab's own ops (_apply_mask)."""
+        s = self.session
+        try:
+            r = MSK.to_raster(m, 256, binning)
+        except ValueError as ex:
+            self.say('MASK FAILED: %s' % ex)
+            return
+        cur = s.mask
+        if cur is None and op in ('add', 'and'):
+            op = 'replace'
+        if op != 'replace':
+            if cur is None:
+                cur = np.ones((256, 256), dtype=bool)
+            r = MSK.combine(cur, r, {'add': 'or', 'and': 'and',
+                                     'subtract': 'sub'}[op])
+            name = '%s%s%s' % (s.mask_name or 'field',
+                               {'add': '+', 'and': '&', 'subtract': '-'}[op],
+                               name)
+        if not r.any():
+            self.say('That would leave an empty mask - mask kept.')
+            return
+        self._apply_mask(r, name, combine=False)
 
     @user_action
     def on_map_step(self, step):
@@ -1811,8 +1993,10 @@ class MainWindow(QtWidgets.QMainWindow):
             for sh in sorted(b.available):
                 if o.e_low <= s.map_line_energy(b.Z, sh) <= o.e_high:
                     lines.append(s.map_line_name(b.Z, sh))
-        self.cmb_mapel.clear()
-        self.cmb_mapel.addItems(lines)
+        self._window_lines = lines
+        if self.cmb_kind.currentIndex() == 0:
+            self.cmb_mapel.clear()
+            self.cmb_mapel.addItems(lines)
         n = sum(len(b.available)
                 for b in self.elements.table.buttons.values())
         self.say('Element table set for %.2f-%.2f keV: %d element-shell '
@@ -1854,9 +2038,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.say('DA LOAD FAILED: %s' % ex)
             return
         els = s.dam_elements()
+        self._sync_map_kind(prefer_da=True)       # Maps now shows DA maps
         self.say('DA matrix loaded: %d elements (%s).%s  Calibration left as '
-                 'it was. Analysis > Concentration profiles now gives real '
-                 'deconvolved concentrations.'
+                 'it was. The Maps tab now shows DA maps (wt%%); Analysis > '
+                 'Concentration profiles uses them too.'
                  % (len(els), ', '.join(str(e) for e in els[:14]),
                     ' ...' if len(els) > 14 else ''))
 
@@ -2347,8 +2532,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.say('Show a map first.')
             return
         s = self.session
-        stem = '%s_%s_bin%d' % (meta['stem'] or 'map', meta['element'],
-                                meta['binning'])
+        stem = '%s_%s_%s_bin%d' % (
+            meta['stem'] or 'map', re.sub(r'\W+', '', meta['element']),
+            'DA' if meta['kind'].startswith('DA') else 'window',
+            meta['binning'])
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, 'Export the shown map', stem + '.csv', 'CSV (*.csv)')
         if not path:
@@ -2411,6 +2598,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._apply_mask(m, self.session.mask_name or 'mask', combine=False)
 
+    def _mask_binning(self, m):
+        """Binning of a mask made on the shown map (None for a raster one)."""
+        m = np.asarray(m)
+        if (m.shape == (256, 256) or self.map._data is None
+                or m.shape != self.map._data.shape):
+            return None
+        return self.map.binning()
+
     def _apply_mask(self, m, name, combine=True):
         """Make m (map- or raster-shaped) the session mask, or with the
         mask op set, add it to or take it from the current one."""
@@ -2422,11 +2617,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # itself (our choice; not checked against GeoPIXE's exclude)
             cur = np.ones((256, 256), dtype=bool)
         if op != 'replace' and cur is not None:
-            f = cur.shape[0] // m.shape[0]
-            r = np.repeat(np.repeat(np.asarray(m, bool), f, 0), f, 1)
-            if r.shape != cur.shape:
-                self.say('MASK FAILED: a %dx%d map does not tile the %dx%d '
-                         'raster' % (m.shape + cur.shape))
+            try:
+                r = MSK.to_raster(m, cur.shape[0], self._mask_binning(m))
+            except ValueError as ex:
+                self.say('MASK FAILED: %s' % ex)
                 return
             m = MSK.combine(cur, r, 'or' if op == 'add' else 'sub')
             if self.session.mask is not None and (m == cur).all():
@@ -2437,7 +2631,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.say('That would leave an empty mask - mask kept.')
                 return
         try:
-            n = self.session.set_mask(m, name)
+            n = self.session.set_mask(m, name, self._mask_binning(m))
         except Exception as ex:
             self.say('MASK FAILED: %s' % ex)
             return

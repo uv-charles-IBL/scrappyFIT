@@ -288,11 +288,34 @@ This is the part that matters most and the part GeoPIXE makes hardest.
 
 Go to the **Maps** tab, choose a line, **Show map**. The list holds the lines
 inside the fit range: `Si` is the K line, `Ag L` and `Pb M` the L-alpha and
-M-alpha lines; typing `AgL`, `Ag:L`, `ag l` or an energy in keV works too. A line whose
-peak window is off the spectrum is refused (the flanking background windows
-are not checked yet, BUGS.md), and so is **Mask above percentile** on a
-flat map (every pixel would be "above" it). Map browsing never changes the
+M-alpha lines; typing `AgL`, `Ag:L`, `ag l` or an energy in keV works too.
+**table...** shows the same lines as a periodic table: click an element to map
+it, and where it has more than one shell on the spectrum, choose K, L or M. A line whose
+peak window is off the spectrum is refused, and so is **Mask above percentile** on a
+flat map (every pixel would be "above" it). The background flanks, each one
+peak-width wide and one width from the peak, are taken only from channels that
+hold events (from the first count, usually the detector threshold, to the last).
+A flank cut to under half a width is dropped and the background is then flat
+from the other flank alone, which the message line reports; with neither flank
+the map is refused. Near the threshold a flank sits on the rising edge of the
+spectrum and reads low, so a light-element net map there reads high. Map browsing never changes the
 spectrum or the fit; only a mask does, and the title then carries its name.
+
+Every map says what it is, in its title, its colour-bar units and the line
+under the controls. There are two kinds (the first box on the row):
+
+- **window**: counts per pixel in an energy window round the line, smoothed by a
+  1-pixel Gaussian. **background** chooses what is subtracted, the same choices
+  as GeoPIXE's window ("cut") images: *linear* (two flanks, interpolated under
+  the peak; the default), *flat, low flank* or *flat, high flank* (one flank),
+  or *none* (raw counts). The line under the controls gives the keV window and
+  the flank channels used.
+- **DA matrix**: concentration in wt% through a GeoPIXE DA matrix (File > Load
+  DA matrix). Every event adds its channel's weight for that element, so
+  overlapping lines and the background are resolved as in GeoPIXE's own
+  images. Loading a matrix switches the tab to DA maps and lists the matrix's
+  elements; switch back to *window* for any other line. Opening another file
+  drops the matrix and returns to window maps.
 
 Then either:
 
@@ -303,6 +326,21 @@ Then either:
 
 Either way the spectrum becomes the sum over just those pixels. Refit, and you
 are analysing that region rather than the whole field.
+
+Any binning works. One that does not divide 256 (3, 5, 6, ...) leaves the
+last row and column of the map partial: at binning 3 they hold one raster
+column, so a window map reads about a third as high there and a percentile
+mask passes them over. A DA map is per unit charge and reads normally.
+
+**Associations...** plots one map against another (pick x and y, then
+**Plot**): every pixel is a point, drawn as a 2-D histogram with the density in
+log colour, and Pearson r is reported. A phase is a cluster; click round it (click
+the first corner to close) and every pixel in it becomes the mask, wherever it
+lies on the map, which no shape drawn on the map can do. The box above the plot
+says what the region does: replace the mask, add to it, refine it (keep only
+pixels in both) or take from it. The maps are made as the Maps tab would make
+them: same kind (window or DA), background and binning. Tick **log** on an axis
+whose values span decades.
 
 The active mask is drawn on the map (light tint, cyan outline). **grow** and
 **shrink** move its edge by one displayed pixel (the binning: 4 raster pixels
@@ -348,7 +386,7 @@ one model genuinely cannot describe two different materials at once.
 that fails where a weak line sits between two strong ones. Aluminium between
 magnesium and silicon is the standard case: the map goes negative and is
 meaningless. scrappyFIT warns you when a net map comes out mostly negative.
-Untick *subtract background* and read raw counts, or use a DA matrix map,
+Set **background** to *none* and read raw counts, or use a DA matrix map,
 which resolves overlaps properly.
 
 ### 3.6 Export

@@ -480,6 +480,51 @@ MAP_SCALES = ('linear', 'log', 'sqrt')
 MAP_BAR_PX = 90
 #: Default colour limits, percentiles of the shown map.
 MAP_PCT = (2.0, 99.0)
+#: What a Maps tab map is made from (Session.element_map / da_map).
+MAP_KINDS = ('window', 'DA matrix')
+#: Window backgrounds (label, Session.element_map key), as GeoPIXE's cut
+#: types: X0-X5 linear, the old one-flank cut, the plain cut
+#: (analyze_cut.pro:74-103, 50-71, 19-34).
+MAP_BACKGROUNDS = (('linear (two flanks)', 'linear'),
+                   ('flat, low flank', 'low'),
+                   ('flat, high flank', 'high'),
+                   ('none (raw counts)', 'none'))
+
+
+def map_kind_short(info):
+    """A few words for the map title: 'WINDOW, net counts', 'DA, wt%'."""
+    if info.get('kind') == 'DA':
+        return 'DA, wt%'
+    if info.get('background') == 'none':
+        return 'WINDOW, raw counts'
+    return 'WINDOW, net counts'
+
+
+def describe_map(info):
+    """One or two sentences saying what a map is (Session.map_info)."""
+    if not info:
+        return 'No map shown.'
+    b = info.get('binning', 1)
+    if info.get('kind') == 'DA':
+        return ('DA map of %s: concentration in wt%% through the GeoPIXE DA '
+                'matrix %s (its "%s" row). Each event adds the matrix weight '
+                'of its channel, so overlapping lines and the background are '
+                'resolved. %dx%d raster px per pixel, unsmoothed.'
+                % (info.get('line'), info.get('matrix'), info.get('dam_name'),
+                   b, b))
+    lo, hi = info['window']
+    k0, k1 = info.get('keV', (float('nan'), float('nan')))
+    bg = info.get('background', 'none')
+    if bg == 'none':
+        back = 'no background subtracted (raw counts)'
+    else:
+        back = 'background %s, channels %s' % (bg, ' and '.join(
+            '%d-%d' % f for f in info.get('flanks', ())))
+    return ('WINDOW map of %s: counts per pixel in %.3f-%.3f keV (channels '
+            '%d-%d); %s. %dx%d raster px per pixel, 1 px Gaussian smoothing. '
+            'A window counts every line under it: overlaps are not '
+            'separated (load a DA matrix for that).'
+            % (info.get('line'), k0, k1, lo, hi, back, b, b))
 
 
 class MapCanvas(_Canvas):
@@ -503,6 +548,7 @@ class MapCanvas(_Canvas):
         self._img = None
         self._cbar = None
         self._data = None
+        self._binning = None
         self._mask_art = []
         # display settings survive Show map, so stepping through elements
         # keeps the scale the user chose
@@ -568,8 +614,12 @@ class MapCanvas(_Canvas):
         if m.any():
             self.polygonSelected.emit(m)
 
-    def show_map(self, data, title='', cmap=None):
+    def show_map(self, data, title='', cmap=None, binning=None, units=''):
+        """binning: raster pixels per map pixel; inferred from the size if
+        not given, which fails for sizes several binnings make. units label
+        the colour bar ('counts / pixel', 'wt%')."""
         self._data = np.asarray(data, dtype=float)
+        self._binning = binning
         self.ax.clear()
         self._mask_art = []
         if cmap is not None:
@@ -596,6 +646,7 @@ class MapCanvas(_Canvas):
             self._img.colorbar_cid = self._img.callbacks.connect(
                 'changed', self._cbar.update_normal)
             self._cbar.update_normal(self._img)
+        self._cbar.set_label(units, fontsize=9, color=INK)
         self.ax.set_xticks([])
         self.ax.set_yticks([])
         self.ax.set_title(title, fontsize=10, color=INK)
@@ -700,7 +751,7 @@ class MapCanvas(_Canvas):
         """Raster pixels per displayed pixel (1 before any map is shown)."""
         if self._data is None:
             return 1
-        return max(raster // self._data.shape[0], 1)
+        return MSK.bin_factor(self._data.shape[0], raster, self._binning)
 
     def set_mask(self, mask):
         """Outline the active mask over the map; None removes it.
@@ -716,8 +767,13 @@ class MapCanvas(_Canvas):
         self._mask_art = []
         if mask is not None and self._data is not None:
             m = np.asarray(mask, dtype=float)
-            n = self._data.shape[0]
-            ext = (-0.5, n - 0.5, -0.5, n - 0.5)
+            # raster pixels on the map's grid: map pixel i covers raster
+            # pixels i*b .. i*b+b-1, so the raster's far edge is at
+            # 256/b - 0.5, short of the last (partial) map pixel's edge
+            # when b does not divide the raster
+            b = self.binning(m.shape[0])
+            r = m.shape[0] / float(b)
+            ext = (-0.5, r - 0.5, -0.5, r - 0.5)
             tint = np.zeros(m.shape + (4,))
             tint[m > 0] = (0.35, 0.85, 1.0, 0.30)
             self._mask_art.append(self.ax.imshow(

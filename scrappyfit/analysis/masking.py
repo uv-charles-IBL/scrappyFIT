@@ -159,6 +159,58 @@ def combine(a, b, how='or'):
     return {'or': a | b, 'and': a & b, 'sub': a & ~b, 'xor': a ^ b}[how]
 
 
+def bin_factor(n, raster=256, binning=None):
+    """Raster pixels per side of one pixel of an n-pixel map: the binning b
+    with ceil(raster / b) == n. Maps are ceil-sized, so at a binning that
+    does not divide the raster (3 -> 86 px) the last pixel is partial.
+
+    Give binning when it is known: it is checked against n and returned.
+    Inferred from n alone it can be ambiguous (16 and 17 both make 16 px,
+    26-28 all make 10), and a wrong factor puts a mask up to b - 1 raster
+    pixels off with no error; an ambiguous n raises ValueError.
+    """
+    n = int(n)
+    if n <= 0:
+        raise ValueError('a map needs at least one pixel')
+    if binning is not None:
+        b = int(binning)
+        if b < 1 or -(-raster // b) != n:
+            raise ValueError('a %d-px map is not binning %d of the %d-px '
+                             'raster' % (n, b, raster))
+        return b
+    fits = [b for b in range(1, raster + 1) if -(-raster // b) == n]
+    if not fits:
+        raise ValueError('a %d-px map is not a binning of the %d-px raster'
+                         % (n, raster))
+    if len(fits) > 1:
+        raise ValueError('a %d-px map could be binning %s of the %d-px '
+                         'raster: say which' % (n, ' or '.join(
+                             str(b) for b in fits), raster))
+    return fits[0]
+
+
+def to_raster(mask, raster=256, binning=None):
+    """A map-shaped mask as a raster-shaped one (raster x raster); binning
+    as bin_factor."""
+    m = np.asarray(mask, dtype=bool)
+    if m.shape == (raster, raster) and binning in (None, 1):
+        return m
+    if m.shape[0] != m.shape[1]:
+        raise ValueError('mask is not square: %s' % (m.shape,))
+    b = bin_factor(m.shape[0], raster, binning)
+    return np.repeat(np.repeat(m, b, 0), b, 1)[:raster, :raster]
+
+
+def map_fraction(mask, n, raster=256, binning=None):
+    """Fraction of each pixel of an n-pixel map's raster pixels inside a
+    raster-shaped mask (a partial edge pixel counts only its own)."""
+    m = np.asarray(mask, dtype=float)
+    b = bin_factor(n, raster, binning)
+    pad = np.full((n * b, n * b), np.nan)
+    pad[:m.shape[0], :m.shape[1]] = m
+    return np.nanmean(pad.reshape(n, b, n, b), axis=(1, 3))
+
+
 def describe(mask):
     m = np.asarray(mask, dtype=bool)
     return '%d of %d pixels (%.1f%%)' % (m.sum(), m.size, 100 * m.mean())

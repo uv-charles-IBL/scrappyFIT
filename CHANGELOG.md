@@ -6,6 +6,67 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.26.0)
 
+### Maps (map numbers change; no fitted number changes)
+- Smoothed window maps no longer read low on the outer pixels. `analysis/maps.py` `smooth` zero-padded
+  the field, so a flat map read 30 % low on the edge rows, 51 % in the corners and 6 % one pixel in;
+  it now divides by the kernel weight inside the field. On 287424 (Si, raw window, bin 4) the edge
+  rows went from 64 % to 92 % of the interior mean and the corners from 41 % to 85 % (Ag L: 64 -> 92 %,
+  51 -> 104 %) (`D:\Claude gens misc\maps-phase3\edge_check.py`, 2026-10-21). Interior pixels are
+  unchanged. Near the edge this moves window-map values, CSV exports, Profiles traverses on window
+  maps, the default colour limits, and the pixels a percentile mask picks (so the spectrum and fit of
+  a region masked from a map that touches the edge). Edge pixels now average fewer neighbours and are
+  noisier. DA maps and unmasked fits are unaffected.
+- Net window maps take their background flanks only from channels that hold events: from the zero of
+  energy (and the spectrum's first count) to its last count. A flank clipped to under half the peak
+  window's width is dropped and the background is flat from the other flank; with neither, the map
+  refuses ("map it without subtraction"). `Session.map_info` records the window, the flanks and which
+  background was used. On 287424 the first count is channel 305 (0.146 keV), so C (flank 159-249) and
+  N (229-318) lose their low flank: mean net per bin-4 pixel C 1.05 -> -3.64 and N 8.14 -> 6.43,
+  O and Si unchanged (`D:\Claude gens misc\maps-phase3\flank_check.py`, 2026-10-21). The C map
+  now goes negative because its only flank, 518-608, sits on O K: a window map cannot separate them;
+  use a DA map. A line near the top of the spectrum likewise no longer reads an empty high flank.
+  A percentile mask cut from a net C or N map now selects different pixels, so that region's
+  spectrum and fit change; unmasked fits do not.
+- Masks work at a binning that does not divide 256 (3, 5, 6, 7, ...). Window and DA maps are now
+  ceil(256 / binning) pixels a side (binning 3: 86, was 85), so the last raster row and column have a
+  pixel: `nbin // binning` wrapped x = 255 into the next row and dropped the top row, and a rectangle
+  on the map raised `MASK FAILED` (IndexError). The last pixel is partial; a DA map divides each pixel
+  by the charge of its own raster pixels, so it reads like the rest; a window (counts) map's last row
+  and column read low in proportion (a third at binning 3), so a percentile mask skips them. The mask
+  overlay sits on the raster's true extent. `analysis/masking.py` gains `bin_factor`, `to_raster` and
+  `map_fraction`; the Maps tab passes the binning with every mask, because the map size alone is
+  ambiguous above binning 15 (16 and 17 both make 16 px) and `Session.set_mask` now refuses an
+  ambiguous map-shaped mask unless `binning=` says which.
+  At binnings that divide 256 (1, 2, 4, 8, 16, 32; default 4) no map, mask or DA number changes; a
+  script passing a 16- or 8-px mask to `set_mask` must now add `binning=16` or `binning=32`.
+
+### Maps tab: map kinds and backgrounds
+- Every map says what it is. A **window** map (counts in an energy window) or a **DA matrix** map
+  (wt% through a loaded GeoPIXE .dam) is chosen in the first box, and the title (`WINDOW, net counts`,
+  `WINDOW, raw counts`, `DA, wt%`), the colour-bar units and a line under the controls (keV window,
+  channels, background and flanks, or the matrix and its row) state it. Loading a DA matrix switches
+  the tab to DA maps of the matrix's elements; before, DA maps reached only Concentration profiles.
+- Window background choices as GeoPIXE's cut types (`analyze_cut.pro`; geopixe-ref 2026-10-21):
+  linear between two flanks (default, as before), flat from the low or the high flank, or none. The
+  "subtract background" checkbox is gone: its default (ticked) is the combo's default, linear, and
+  unticked is "none". `Session.element_map(background=...)`, `Session.da_map`,
+  `Session.da_map_names`. No map number changes for the default (linear) or for "none".
+- **table...** beside the line list opens a periodic table of the map lines (window lines in the fit
+  range, or the DA matrix's elements) in the element dialog's layout; each cell shows the shells it
+  can map, one click maps a single shell and a cell with several asks which (`Fe` / `Fe L`). GeoPIXE
+  picks from a droplist only (`gimage.pro:1636-1647`). `gui/maplines.py`.
+- **Associations...** plots one map against another as GeoPIXE's Element Associations (`corr.pro`;
+  geopixe-ref 2026-10-21): a 2-D histogram of the two maps' pixel values (made as the Maps tab makes
+  them: same kind, background and binning), density in log colour, optional log axes 5 decades deep,
+  negatives clipped to 0, range 1.05 x the maximum inside a 2 % border, and Pearson r. A polygon drawn
+  round a cluster selects every pixel whose point lies inside (GeoPIXE tests the histogram bin; here
+  the pixel's own point, so the selection does not depend on the bins) and replaces, adds to, refines
+  (AND) or takes from the mask, after GeoPIXE's include / refine / reject (whether its reject takes
+  from the current selection or the field was not checked). Every pixel is on the plot: a hot pixel
+  in the border sits on the top edge. Pearson r is of the values as plotted (negatives at 0). Window maps are not divided by
+  a charge map as GeoPIXE's axes are (no charge map here yet). `analysis/association.py`,
+  `gui/association.py`.
+
 ## 0.26.0 - 2026-10-21: spectrum display, Sabbatucci-Salvat fetched on first use
 
 ### Fixes
