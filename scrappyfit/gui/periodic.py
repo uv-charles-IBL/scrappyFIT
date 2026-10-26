@@ -126,9 +126,13 @@ class PeriodicTable(QtWidgets.QWidget):
     selectionChanged = QtCore.pyqtSignal()
     elementPicked = QtCore.pyqtSignal(int)
 
-    def __init__(self, db, parent=None, pick_only=False):
+    def __init__(self, db, parent=None, pick_only=False, lines_fn=None):
         super().__init__(parent)
         self.db = db
+        # (Z, shell) -> [(keV, intensity)]: Session.shell_lines in the GUI, so
+        # a shell is offered when the fit can build it; the table alone
+        # (db.line_list) has no M lines below Cd
+        self.lines_fn = lines_fn or db.line_list
         self.pick_only = pick_only
         self.buttons = {}
         g = QtWidgets.QGridLayout(self)
@@ -163,7 +167,7 @@ class PeriodicTable(QtWidgets.QWidget):
             av = []
             for sh in (1, 2, 3):
                 try:
-                    lines = self.db.line_list(b.Z, sh)
+                    lines = self.lines_fn(b.Z, sh)
                 except Exception:
                     lines = []
                 if any(e_low <= e <= e_high and i >= min_intensity
@@ -220,15 +224,21 @@ class LineTable(QtWidgets.QWidget):
     """Every tabulated line of one element, per shell. The reference you want
     open while deciding whether a feature is really that element."""
 
-    def __init__(self, db, parent=None):
+    def __init__(self, db, parent=None, groups_fn=None):
         super().__init__(parent)
         self.db = db
+        # (Z, shell) -> [(group name, [(keV, intensity)])]: in the GUI
+        # Session.shell_line_groups, so an M shell split into subshells lists
+        # each one under its own name, intensities within that subshell
+        self.groups_fn = groups_fn or (
+            lambda Z, sh: [(SHELL_CH[sh], db.line_list(Z, sh))])
         v = QtWidgets.QVBoxLayout(self)
         self.title = QtWidgets.QLabel('click an element above')
         self.title.setStyleSheet('font-weight:bold; font-size:13px;')
         self.table = QtWidgets.QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ['shell', 'line', 'energy keV', 'rel. intensity', 'in window'])
+            ['shell', 'line', 'energy keV', 'rel. intensity (in group)',
+             'in window'])
         self.table.horizontalHeader().setStretchLastSection(True)
         v.addWidget(self.title)
         v.addWidget(self.table)
@@ -240,17 +250,19 @@ class LineTable(QtWidgets.QWidget):
         rows = []
         for sh in (1, 2, 3):
             try:
-                lines = self.db.line_list(Z, sh)
+                groups = self.groups_fn(Z, sh)
             except Exception:
-                lines = []
-            for e, i in sorted(lines, key=lambda t: -t[1]):
-                rows.append((SHELL_CH[sh], e, i, lo <= e <= hi))
+                groups = []
+            for name, lines in groups:
+                grp = '%s line' % name if name == SHELL_CH[sh] else name
+                for e, i in sorted(lines, key=lambda t: -t[1]):
+                    rows.append((SHELL_CH[sh], grp, e, i, lo <= e <= hi))
         edge = self.db.edge.get((Z, 'K'), 0.0)
         self.title.setText('%s  (Z = %d)%s' % (sym, Z,
                            '     K edge %.4f keV' % edge if edge else ''))
         self.table.setRowCount(len(rows))
-        for r, (shn, e, i, inw) in enumerate(rows):
-            vals = (shn, '%s line' % shn, '%.4f' % e, '%.4f' % i,
+        for r, (shn, grp, e, i, inw) in enumerate(rows):
+            vals = (shn, grp, '%.4f' % e, '%.4f' % i,
                     'yes' if inw else '-')
             for c, t in enumerate(vals):
                 it = QtWidgets.QTableWidgetItem(t)

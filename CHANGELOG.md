@@ -6,6 +6,19 @@ reproducible against a stated version.
 
 ## Unreleased (since v0.28.0)
 
+### GUI fits change (Session and CLI fits do not)
+- The element table offers a shell when the fit can build it, so M shells below Cd can be
+  chosen again, and opening the element dialog on a recipe no longer drops them (BUGS.md
+  "Element table cannot select M shells below Cd"). Before, the table looked only at the line
+  table's five M lines, which start at Cd. On the published 287424 recipe, pressing OK in the
+  dialog removed AgM, so later GUI fits ran without it. With `split_m_subshells` on (the
+  default), M availability now comes from the xraylib subshell lines the fit uses
+  (`Session.shell_line_groups`). That includes Z >= 57 and light elements (Sr, Zr, ...) whose
+  M1-M3 lines lie above 0.2 keV. A test checks that the table agrees with `build_components`
+  for Z 20-92 in three windows.
+- The Line viewer lists split M lines per subshell (M5, M4, Mz, M3, ...), with intensities
+  relative within each subshell; the column is now "rel. intensity (in group)".
+
 ## 0.28.0 - 2026-10-26: analytic shape Jacobian (287424 4.2x faster)
 
 ### Physics that changes fitted numbers
