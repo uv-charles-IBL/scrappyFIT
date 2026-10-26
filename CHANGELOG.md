@@ -4,7 +4,9 @@ Versions follow [semantic versioning](https://semver.org). Physics changes
 that alter fitted numbers are always called out, because a result is only
 reproducible against a stated version.
 
-## Unreleased (since v0.27.0)
+## Unreleased (since v0.28.0)
+
+## 0.28.0 - 2026-10-26: analytic shape Jacobian (287424 4.2x faster)
 
 ### Physics that changes fitted numbers
 - The shape fit uses an analytic Jacobian, not finite differences (BUGS.md "The shape-parameter
