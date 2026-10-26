@@ -30,7 +30,7 @@ class ElementDialog(QtWidgets.QDialog):
 
     selectionChanged = QtCore.pyqtSignal()
 
-    def __init__(self, db, parent=None):
+    def __init__(self, db, parent=None, lines_fn=None, groups_fn=None):
         super().__init__(parent)
         self.db = db
         self.setWindowTitle('Elements')
@@ -43,7 +43,7 @@ class ElementDialog(QtWidgets.QDialog):
         # -- fit selection
         w1 = QtWidgets.QWidget()
         v1 = QtWidgets.QVBoxLayout(w1)
-        self.table = PeriodicTable(db)
+        self.table = PeriodicTable(db, lines_fn=lines_fn)
         self.table.selectionChanged.connect(self._on_change)
         v1.addWidget(self.table)
         self.lbl = QtWidgets.QLabel('(nothing selected)')
@@ -64,8 +64,8 @@ class ElementDialog(QtWidgets.QDialog):
         # -- line viewer
         w2 = QtWidgets.QWidget()
         v2 = QtWidgets.QVBoxLayout(w2)
-        self.viewer = PeriodicTable(db, pick_only=True)
-        self.lines = LineTable(db)
+        self.viewer = PeriodicTable(db, pick_only=True, lines_fn=lines_fn)
+        self.lines = LineTable(db, groups_fn=groups_fn)
         self.viewer.elementPicked.connect(self.lines.show_element)
         v2.addWidget(self.viewer)
         v2.addWidget(self.lines, 1)

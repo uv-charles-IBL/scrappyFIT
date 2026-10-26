@@ -522,7 +522,9 @@ class Database:
         Below Z = 57 the 4f shell is empty, so there is no Ma/Mb: M4 and M5 decay
         through N2/N3 (the Mz lines) and those ARE the M4/M5 groups - they are not
         split out. I M5-N3 0.497 / M4-N2 0.509, Cs 0.564 / 0.567, Ag ~0.31 keV. The
-        line table has no M lines at all for Z = 45-72; this is where they come from.
+        vendored line table (xray_lines_rebuilt.txt) has no M lines below Cd (48) and
+        no Ma1 below Gd (64); GeoPIXE's own xray_lines.txt has none below Ta (73)
+        (2026-10-26). This is where they come from.
 
         Why this exists. The line table carries five M lines - Ma, Mb, Mg,
         Mz and one more - which is the M4 and M5 story only. The M1, M2 and

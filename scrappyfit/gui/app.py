@@ -197,7 +197,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.jobs.progress.connect(self._on_job_progress)
         self.setWindowTitle('scrappyFIT %s' % __version__)
         self.resize(*DEFAULT_SIZE)
-        self.elements = ElementDialog(self.session.db, self)
+        self.elements = ElementDialog(
+            self.session.db, self, lines_fn=self.session.shell_lines,
+            groups_fn=self.session.shell_line_groups)
         self.elements.selectionChanged.connect(self._on_elements_changed)
         self.sample = SampleModelDialog(self.session.db, self)
         self.sample.yieldPicked.connect(

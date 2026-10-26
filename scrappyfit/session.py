@@ -1087,6 +1087,31 @@ class Session:
         except Exception:
             return lines
 
+    def shell_line_groups(self, Z, shell):
+        """[(name, [(keV, rel. intensity)])]: the line groups the fit builds
+        (Z, shell) from, as build_components does. One group, the line table's
+        ('K', 'L' or 'M'), except an M shell with split_m_subshells on: one
+        group per subshell from db.m_subshell_lines, rates summing to 1 within
+        each, since the fit frees the subshell populations.
+
+        The element table offers a shell from these, so it offers what the
+        fit can build. The line table has no M rows below Cd, and Ag M was
+        greyed out and dropped from the 287424 recipe while the fit built it
+        (M4/M5 Mz 0.31 keV, M3 0.57 keV: db.m_subshell_lines(47), xraylib,
+        2026-10-26)."""
+        if shell == 3 and self.options.split_m_subshells:
+            subs = self.db.m_subshell_lines(Z)
+            if subs:
+                order = ('M5', 'M4', 'Mz', 'M3', 'M2', 'M1')
+                return [(k, subs[k]) for k in sorted(
+                    subs, key=lambda k: order.index(k) if k in order else 9)
+                    if subs[k]]
+        return [({1: 'K', 2: 'L', 3: 'M'}[shell], self.db.line_list(Z, shell))]
+
+    def shell_lines(self, Z, shell):
+        """shell_line_groups as one [(keV, rel. intensity)] list."""
+        return [t for _, ll in self.shell_line_groups(Z, shell) for t in ll]
+
     def build_components(self, spec):
         """spec: element symbols, or (Z, shell) pairs. Shell 1 = K, 2 = L,
         3 = M. 3d-metal L components get the broadened band shape, because
